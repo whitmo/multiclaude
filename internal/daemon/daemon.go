@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/dlorenc/multiclaude/internal/logging"
 	"github.com/dlorenc/multiclaude/internal/messages"
+	"github.com/dlorenc/multiclaude/internal/prompts"
 	"github.com/dlorenc/multiclaude/internal/socket"
 	"github.com/dlorenc/multiclaude/internal/state"
 	"github.com/dlorenc/multiclaude/internal/tmux"
@@ -21,12 +24,13 @@ import (
 
 // Daemon represents the main daemon process
 type Daemon struct {
-	paths   *config.Paths
-	state   *state.State
-	tmux    *tmux.Client
-	logger  *logging.Logger
-	server  *socket.Server
-	pidFile *PIDFile
+	paths            *config.Paths
+	state            *state.State
+	tmux             *tmux.Client
+	logger           *logging.Logger
+	server           *socket.Server
+	pidFile          *PIDFile
+	claudeBinaryPath string // Full path to claude binary
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -52,16 +56,24 @@ func New(paths *config.Paths) (*Daemon, error) {
 		return nil, fmt.Errorf("failed to load state: %w", err)
 	}
 
+	// Resolve claude binary path
+	claudePath, err := exec.LookPath("claude")
+	if err != nil {
+		logger.Warn("Claude binary not found in PATH: %v", err)
+		claudePath = "claude" // Fall back to just "claude"
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	d := &Daemon{
-		paths:   paths,
-		state:   st,
-		tmux:    tmux.NewClient(),
-		logger:  logger,
-		pidFile: NewPIDFile(paths.DaemonPID),
-		ctx:     ctx,
-		cancel:  cancel,
+		paths:            paths,
+		state:            st,
+		tmux:             tmux.NewClient(),
+		logger:           logger,
+		pidFile:          NewPIDFile(paths.DaemonPID),
+		claudeBinaryPath: claudePath,
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	// Create socket server
@@ -86,14 +98,18 @@ func (d *Daemon) Start() error {
 
 	d.logger.Info("Socket server started at %s", d.paths.DaemonSock)
 
-	// Start core loops
+	d.logger.Info("Daemon started successfully")
+
+	// Restore agents for tracked repos BEFORE starting health checks
+	// This prevents race conditions where health check cleans up agents being restored
+	d.restoreTrackedRepos()
+
+	// Start core loops after restore completes
 	d.wg.Add(4)
 	go d.healthCheckLoop()
 	go d.messageRouterLoop()
 	go d.wakeLoop()
 	go d.serverLoop()
-
-	d.logger.Info("Daemon started successfully")
 
 	return nil
 }
@@ -874,6 +890,236 @@ func (d *Daemon) cleanupOrphanedWorktrees() {
 			d.logger.Warn("Failed to prune worktrees for %s: %v", repoName, err)
 		}
 	}
+}
+
+// restoreTrackedRepos restores agents for tracked repos that are missing their tmux sessions
+func (d *Daemon) restoreTrackedRepos() {
+	d.logger.Info("Checking tracked repos for restoration")
+
+	repos := d.state.GetAllRepos()
+	for repoName, repo := range repos {
+		// Check if tmux session exists
+		hasSession, err := d.tmux.HasSession(repo.TmuxSession)
+		if err != nil {
+			d.logger.Error("Failed to check session %s: %v", repo.TmuxSession, err)
+			continue
+		}
+
+		if hasSession {
+			d.logger.Debug("Tmux session %s exists for repo %s", repo.TmuxSession, repoName)
+			continue
+		}
+
+		// Session doesn't exist - restore it
+		d.logger.Info("Restoring agents for repo %s (tmux session %s was missing)", repoName, repo.TmuxSession)
+		if err := d.restoreRepoAgents(repoName, repo); err != nil {
+			d.logger.Error("Failed to restore agents for repo %s: %v", repoName, err)
+		}
+	}
+}
+
+// restoreRepoAgents restores the tmux session and agents for a tracked repo
+func (d *Daemon) restoreRepoAgents(repoName string, repo *state.Repository) error {
+	repoPath := d.paths.RepoDir(repoName)
+
+	// Verify the repo still exists on disk
+	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+		return fmt.Errorf("repository path does not exist: %s", repoPath)
+	}
+
+	// Clear any stale agents from state (their tmux session is gone)
+	for agentName := range repo.Agents {
+		d.logger.Debug("Removing stale agent %s/%s from state", repoName, agentName)
+		if err := d.state.RemoveAgent(repoName, agentName); err != nil {
+			d.logger.Warn("Failed to remove stale agent %s/%s: %v", repoName, agentName, err)
+		}
+	}
+
+	// Create tmux session with supervisor window
+	d.logger.Info("Creating tmux session %s for repo %s", repo.TmuxSession, repoName)
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", repo.TmuxSession, "-n", "supervisor", "-c", repoPath)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create tmux session: %w", err)
+	}
+
+	// Create merge-queue window
+	cmd = exec.Command("tmux", "new-window", "-d", "-t", repo.TmuxSession, "-n", "merge-queue", "-c", repoPath)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create merge-queue window: %w", err)
+	}
+
+	// Start supervisor agent
+	if err := d.startAgent(repoName, repo, "supervisor", prompts.TypeSupervisor, repoPath); err != nil {
+		d.logger.Error("Failed to start supervisor for %s: %v", repoName, err)
+	}
+
+	// Start merge-queue agent
+	if err := d.startAgent(repoName, repo, "merge-queue", prompts.TypeMergeQueue, repoPath); err != nil {
+		d.logger.Error("Failed to start merge-queue for %s: %v", repoName, err)
+	}
+
+	// Create and restore workspace
+	workspacePath := d.paths.AgentWorktree(repoName, "workspace")
+	if _, err := os.Stat(workspacePath); os.IsNotExist(err) {
+		// Workspace worktree doesn't exist, create it
+		d.logger.Info("Creating workspace worktree for %s", repoName)
+		wt := worktree.NewManager(repoPath)
+		// First try to create with existing branch (if workspace branch exists from previous init)
+		if err := wt.Create(workspacePath, "workspace"); err != nil {
+			// Branch doesn't exist, create with new branch
+			if err := wt.CreateNewBranch(workspacePath, "workspace", "HEAD"); err != nil {
+				d.logger.Error("Failed to create workspace worktree for %s: %v", repoName, err)
+			}
+		}
+	}
+
+	// Now start the workspace agent if worktree exists
+	if _, err := os.Stat(workspacePath); err == nil {
+		cmd = exec.Command("tmux", "new-window", "-d", "-t", repo.TmuxSession, "-n", "workspace", "-c", workspacePath)
+		if err := cmd.Run(); err != nil {
+			d.logger.Error("Failed to create workspace window: %v", err)
+		} else {
+			if err := d.startAgent(repoName, repo, "workspace", prompts.TypeWorkspace, workspacePath); err != nil {
+				d.logger.Error("Failed to start workspace for %s: %v", repoName, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// startAgent starts a Claude agent in a tmux window and registers it with state
+func (d *Daemon) startAgent(repoName string, repo *state.Repository, agentName string, agentType prompts.AgentType, workDir string) error {
+	// Generate session ID
+	sessionID, err := generateSessionID()
+	if err != nil {
+		return fmt.Errorf("failed to generate session ID: %w", err)
+	}
+
+	// Write prompt file
+	promptFile, err := d.writePromptFile(repoName, agentType, agentName)
+	if err != nil {
+		return fmt.Errorf("failed to write prompt file: %w", err)
+	}
+
+	// Copy hooks config if needed
+	repoPath := d.paths.RepoDir(repoName)
+	if err := d.copyHooksConfig(repoPath, workDir); err != nil {
+		d.logger.Warn("Failed to copy hooks config: %v", err)
+	}
+
+	// Build Claude command
+	claudeCmd := fmt.Sprintf("%s --session-id %s --dangerously-skip-permissions --append-system-prompt-file %s",
+		d.claudeBinaryPath, sessionID, promptFile)
+
+	// Send command to tmux window
+	target := fmt.Sprintf("%s:%s", repo.TmuxSession, agentName)
+	cmd := exec.Command("tmux", "send-keys", "-t", target, claudeCmd, "C-m")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to start Claude in tmux: %w", err)
+	}
+
+	// Wait a moment for Claude to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Get PID
+	pid, err := d.tmux.GetPanePID(repo.TmuxSession, agentName)
+	if err != nil {
+		d.logger.Warn("Failed to get PID for %s: %v", agentName, err)
+		pid = 0
+	}
+
+	// Register agent with state
+	agent := state.Agent{
+		Type:         state.AgentType(agentType),
+		WorktreePath: workDir,
+		TmuxWindow:   agentName,
+		SessionID:    sessionID,
+		PID:          pid,
+		CreatedAt:    time.Now(),
+	}
+
+	if err := d.state.AddAgent(repoName, agentName, agent); err != nil {
+		return fmt.Errorf("failed to register agent: %w", err)
+	}
+
+	d.logger.Info("Started and registered agent %s/%s", repoName, agentName)
+	return nil
+}
+
+// writePromptFile writes the agent prompt to a file and returns the path
+func (d *Daemon) writePromptFile(repoName string, agentType prompts.AgentType, agentName string) (string, error) {
+	repoPath := d.paths.RepoDir(repoName)
+
+	// Get the prompt (without CLI docs since we don't have them in daemon context)
+	promptText, err := prompts.GetPrompt(repoPath, agentType, "")
+	if err != nil {
+		return "", fmt.Errorf("failed to get prompt: %w", err)
+	}
+
+	// Create prompt file in prompts directory
+	promptDir := filepath.Join(d.paths.Root, "prompts")
+	if err := os.MkdirAll(promptDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create prompt directory: %w", err)
+	}
+
+	promptPath := filepath.Join(promptDir, fmt.Sprintf("%s.md", agentName))
+	if err := os.WriteFile(promptPath, []byte(promptText), 0644); err != nil {
+		return "", fmt.Errorf("failed to write prompt file: %w", err)
+	}
+
+	return promptPath, nil
+}
+
+// copyHooksConfig copies hooks configuration from repo to workdir if it exists
+func (d *Daemon) copyHooksConfig(repoPath, workDir string) error {
+	hooksPath := filepath.Join(repoPath, ".multiclaude", "hooks.json")
+
+	// Check if hooks.json exists
+	if _, err := os.Stat(hooksPath); os.IsNotExist(err) {
+		return nil // No hooks config
+	} else if err != nil {
+		return fmt.Errorf("failed to check hooks config: %w", err)
+	}
+
+	// Create .claude directory in workdir
+	claudeDir := filepath.Join(workDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .claude directory: %w", err)
+	}
+
+	// Copy hooks.json to .claude/settings.json
+	hooksData, err := os.ReadFile(hooksPath)
+	if err != nil {
+		return fmt.Errorf("failed to read hooks config: %w", err)
+	}
+
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	if err := os.WriteFile(settingsPath, hooksData, 0644); err != nil {
+		return fmt.Errorf("failed to write settings.json: %w", err)
+	}
+
+	return nil
+}
+
+// generateSessionID generates a unique UUID v4 session ID
+func generateSessionID() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("failed to generate session ID: %w", err)
+	}
+
+	// Set version (4) and variant bits for UUID v4
+	bytes[6] = (bytes[6] & 0x0f) | 0x40 // Version 4
+	bytes[8] = (bytes[8] & 0x3f) | 0x80 // Variant 10
+
+	return fmt.Sprintf("%x-%x-%x-%x-%x",
+		bytes[0:4],
+		bytes[4:6],
+		bytes[6:8],
+		bytes[8:10],
+		bytes[10:16],
+	), nil
 }
 
 // isProcessAlive checks if a process is running
