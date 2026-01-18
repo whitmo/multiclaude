@@ -17,6 +17,7 @@ func TestGetDefaultPrompt(t *testing.T) {
 		{"worker", TypeWorker, false},
 		{"merge-queue", TypeMergeQueue, false},
 		{"workspace", TypeWorkspace, false},
+		{"review", TypeReview, false},
 		{"unknown", AgentType("unknown"), true},
 	}
 
@@ -71,6 +72,21 @@ func TestGetDefaultPromptContent(t *testing.T) {
 	}
 	if !strings.Contains(workspacePrompt, "Spawn and manage worker agents") {
 		t.Error("workspace prompt should document worker spawning capabilities")
+	}
+
+	// Verify review prompt
+	reviewPrompt := GetDefaultPrompt(TypeReview)
+	if !strings.Contains(reviewPrompt, "code review agent") {
+		t.Error("review prompt should mention 'code review agent'")
+	}
+	if !strings.Contains(reviewPrompt, "Forward progress is forward") {
+		t.Error("review prompt should mention the philosophy 'Forward progress is forward'")
+	}
+	if !strings.Contains(reviewPrompt, "[BLOCKING]") {
+		t.Error("review prompt should mention [BLOCKING] comment format")
+	}
+	if !strings.Contains(reviewPrompt, "multiclaude agent complete") {
+		t.Error("review prompt should mention complete command")
 	}
 }
 
@@ -154,6 +170,22 @@ func TestLoadCustomPrompt(t *testing.T) {
 		}
 
 		prompt, err := LoadCustomPrompt(tmpDir, TypeWorkspace)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if prompt != customContent {
+			t.Errorf("expected %q, got %q", customContent, prompt)
+		}
+	})
+
+	t.Run("with custom review prompt", func(t *testing.T) {
+		customContent := "Custom review instructions"
+		promptPath := filepath.Join(multiclaudeDir, "REVIEW.md")
+		if err := os.WriteFile(promptPath, []byte(customContent), 0644); err != nil {
+			t.Fatalf("failed to write custom prompt: %v", err)
+		}
+
+		prompt, err := LoadCustomPrompt(tmpDir, TypeReview)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
