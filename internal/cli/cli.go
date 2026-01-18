@@ -32,8 +32,10 @@ type Command struct {
 
 // CLI manages the command-line interface
 type CLI struct {
-	rootCmd *Command
-	paths   *config.Paths
+	rootCmd          *Command
+	paths            *config.Paths
+	claudeBinaryPath string // Full path to claude binary to prevent version drift
+	documentation    string // Auto-generated CLI documentation for prompts
 }
 
 // New creates a new CLI
@@ -43,8 +45,15 @@ func New() (*CLI, error) {
 		return nil, err
 	}
 
+	// Resolve the full path to the claude binary to prevent version drift
+	claudePath, err := exec.LookPath("claude")
+	if err != nil {
+		return nil, fmt.Errorf("failed to find claude binary in PATH: %w", err)
+	}
+
 	cli := &CLI{
-		paths: paths,
+		paths:            paths,
+		claudeBinaryPath: claudePath,
 		rootCmd: &Command{
 			Name:        "multiclaude",
 			Description: "repo-centric orchestrator for Claude Code",
@@ -53,6 +62,10 @@ func New() (*CLI, error) {
 	}
 
 	cli.registerCommands()
+
+	// Generate documentation after commands are registered
+	cli.documentation = cli.GenerateDocumentation()
+
 	return cli, nil
 }
 
@@ -71,6 +84,11 @@ func (c *CLI) executeCommand(cmd *Command, args []string) error {
 		if cmd.Run != nil {
 			return cmd.Run([]string{})
 		}
+		return c.showCommandHelp(cmd)
+	}
+
+	// Check for --help or -h flag
+	if args[0] == "--help" || args[0] == "-h" {
 		return c.showCommandHelp(cmd)
 	}
 
@@ -276,6 +294,13 @@ func (c *CLI) registerCommands() {
 		Name:        "repair",
 		Description: "Repair state after crash",
 		Run:         c.repair,
+	}
+
+	// Debug command
+	c.rootCmd.Subcommands["docs"] = &Command{
+		Name:        "docs",
+		Description: "Show generated CLI documentation",
+		Run:         c.showDocs,
 	}
 }
 
@@ -527,8 +552,8 @@ func (c *CLI) initRepo(args []string) error {
 		return fmt.Errorf("failed to create tmux session: %w", err)
 	}
 
-	// Create merge-queue window
-	cmd = exec.Command("tmux", "new-window", "-t", tmuxSession, "-n", "merge-queue", "-c", repoPath)
+	// Create merge-queue window (detached so it doesn't switch focus)
+	cmd = exec.Command("tmux", "new-window", "-d", "-t", tmuxSession, "-n", "merge-queue", "-c", repoPath)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to create merge-queue window: %w", err)
 	}
@@ -759,9 +784,9 @@ func (c *CLI) createWorker(args []string) error {
 	// Get tmux session name (it's mc-<reponame>)
 	tmuxSession := fmt.Sprintf("mc-%s", repoName)
 
-	// Create tmux window for worker
+	// Create tmux window for worker (detached so it doesn't switch focus)
 	fmt.Printf("Creating tmux window: %s\n", workerName)
-	cmd := exec.Command("tmux", "new-window", "-t", tmuxSession, "-n", workerName, "-c", wtPath)
+	cmd := exec.Command("tmux", "new-window", "-d", "-t", tmuxSession, "-n", workerName, "-c", wtPath)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to create tmux window: %w", err)
 	}
@@ -1493,6 +1518,64 @@ func (c *CLI) repair(args []string) error {
 	return nil
 }
 
+func (c *CLI) showDocs(args []string) error {
+	fmt.Println(c.documentation)
+	return nil
+}
+
+// GenerateDocumentation generates markdown documentation for all CLI commands
+func (c *CLI) GenerateDocumentation() string {
+	var sb strings.Builder
+
+	sb.WriteString("# Multiclaude CLI Reference\n\n")
+	sb.WriteString("This is an automatically generated reference for all multiclaude commands.\n\n")
+
+	// Generate docs for each top-level command
+	for name, cmd := range c.rootCmd.Subcommands {
+		c.generateCommandDocs(&sb, name, cmd, 0)
+	}
+
+	return sb.String()
+}
+
+// generateCommandDocs recursively generates documentation for a command and its subcommands
+func (c *CLI) generateCommandDocs(sb *strings.Builder, name string, cmd *Command, level int) {
+	indent := strings.Repeat("#", level+2)
+
+	// Command header
+	sb.WriteString(fmt.Sprintf("%s %s\n\n", indent, name))
+
+	// Description
+	if cmd.Description != "" {
+		sb.WriteString(fmt.Sprintf("%s\n\n", cmd.Description))
+	}
+
+	// Usage
+	if cmd.Usage != "" {
+		sb.WriteString(fmt.Sprintf("**Usage:** `%s`\n\n", cmd.Usage))
+	}
+
+	// Subcommands
+	if len(cmd.Subcommands) > 0 {
+		sb.WriteString("**Subcommands:**\n\n")
+		for subName, subCmd := range cmd.Subcommands {
+			// Skip internal commands
+			if strings.HasPrefix(subName, "_") {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("- `%s` - %s\n", subName, subCmd.Description))
+		}
+		sb.WriteString("\n")
+
+		// Recursively document subcommands
+		for subName, subCmd := range cmd.Subcommands {
+			if !strings.HasPrefix(subName, "_") {
+				c.generateCommandDocs(sb, subName, subCmd, level+1)
+			}
+		}
+	}
+}
+
 // ParseFlags is a simple flag parser
 func ParseFlags(args []string) (map[string]string, []string) {
 	flags := make(map[string]string)
@@ -1549,8 +1632,8 @@ func generateSessionID() (string, error) {
 
 // writePromptFile writes the agent prompt to a temporary file and returns the path
 func (c *CLI) writePromptFile(repoPath string, agentType prompts.AgentType, agentName string) (string, error) {
-	// Get the complete prompt (default + custom)
-	promptText, err := prompts.GetPrompt(repoPath, agentType)
+	// Get the complete prompt (default + custom + CLI docs)
+	promptText, err := prompts.GetPrompt(repoPath, agentType, c.documentation)
 	if err != nil {
 		return "", fmt.Errorf("failed to get prompt: %w", err)
 	}
@@ -1604,8 +1687,8 @@ func (c *CLI) copyHooksConfig(repoPath, worktreePath string) error {
 // startClaudeInTmux starts Claude Code in a tmux window with the given configuration
 // Returns the PID of the Claude process
 func (c *CLI) startClaudeInTmux(tmuxSession, tmuxWindow, workDir, sessionID, promptFile string, initialMessage string) (int, error) {
-	// Build Claude command
-	claudeCmd := fmt.Sprintf("claude --session-id %s --dangerously-skip-permissions", sessionID)
+	// Build Claude command using the full path to prevent version drift
+	claudeCmd := fmt.Sprintf("%s --session-id %s --dangerously-skip-permissions", c.claudeBinaryPath, sessionID)
 
 	// Add prompt file if provided
 	if promptFile != "" {
@@ -1636,9 +1719,12 @@ func (c *CLI) startClaudeInTmux(tmuxSession, tmuxWindow, workDir, sessionID, pro
 		// Wait a bit more for Claude to fully initialize
 		time.Sleep(1 * time.Second)
 
-		cmd = exec.Command("tmux", "send-keys", "-t", target, initialMessage, "C-m")
-		if err := cmd.Run(); err != nil {
-			return pid, fmt.Errorf("failed to send initial message to Claude: %w", err)
+		// Send message using literal mode to ensure it's processed correctly
+		if err := tmuxClient.SendKeysLiteral(tmuxSession, tmuxWindow, initialMessage); err != nil {
+			return pid, fmt.Errorf("failed to send initial message text to Claude: %w", err)
+		}
+		if err := tmuxClient.SendEnter(tmuxSession, tmuxWindow); err != nil {
+			return pid, fmt.Errorf("failed to send Enter for initial message to Claude: %w", err)
 		}
 	}
 

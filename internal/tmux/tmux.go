@@ -101,12 +101,22 @@ func (c *Client) SendKeys(session, windowName, text string) error {
 	return nil
 }
 
-// SendKeysLiteral sends text to a window without Enter
+// SendKeysLiteral sends text to a window without Enter (using -l for literal mode)
 func (c *Client) SendKeysLiteral(session, windowName, text string) error {
 	target := fmt.Sprintf("%s:%s", session, windowName)
 	cmd := exec.Command("tmux", "send-keys", "-t", target, "-l", text)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to send keys: %w", err)
+	}
+	return nil
+}
+
+// SendEnter sends just the Enter key to a window
+func (c *Client) SendEnter(session, windowName string) error {
+	target := fmt.Sprintf("%s:%s", session, windowName)
+	cmd := exec.Command("tmux", "send-keys", "-t", target, "C-m")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to send enter: %w", err)
 	}
 	return nil
 }

@@ -143,7 +143,7 @@ func TestGetPrompt(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	t.Run("default only", func(t *testing.T) {
-		prompt, err := GetPrompt(tmpDir, TypeSupervisor)
+		prompt, err := GetPrompt(tmpDir, TypeSupervisor, "")
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
@@ -169,7 +169,7 @@ func TestGetPrompt(t *testing.T) {
 			t.Fatalf("failed to write custom prompt: %v", err)
 		}
 
-		prompt, err := GetPrompt(tmpDir, TypeWorker)
+		prompt, err := GetPrompt(tmpDir, TypeWorker, "")
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
@@ -181,6 +181,20 @@ func TestGetPrompt(t *testing.T) {
 		}
 		if !strings.Contains(prompt, "Repository-specific instructions") {
 			t.Error("prompt should have separator between default and custom")
+		}
+	})
+
+	t.Run("with CLI docs", func(t *testing.T) {
+		cliDocs := "# CLI Documentation\n\n## Commands\n\n- test command"
+		prompt, err := GetPrompt(tmpDir, TypeSupervisor, cliDocs)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !strings.Contains(prompt, "supervisor agent") {
+			t.Error("prompt should contain default supervisor text")
+		}
+		if !strings.Contains(prompt, "CLI Documentation") {
+			t.Error("prompt should contain CLI docs")
 		}
 	})
 }

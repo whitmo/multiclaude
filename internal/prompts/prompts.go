@@ -71,8 +71,8 @@ func LoadCustomPrompt(repoPath string, agentType AgentType) (string, error) {
 	return string(content), nil
 }
 
-// GetPrompt returns the complete prompt for an agent, combining default and custom prompts
-func GetPrompt(repoPath string, agentType AgentType) (string, error) {
+// GetPrompt returns the complete prompt for an agent, combining default, custom prompts, and CLI docs
+func GetPrompt(repoPath string, agentType AgentType, cliDocs string) (string, error) {
 	defaultPrompt := GetDefaultPrompt(agentType)
 
 	customPrompt, err := LoadCustomPrompt(repoPath, agentType)
@@ -80,11 +80,19 @@ func GetPrompt(repoPath string, agentType AgentType) (string, error) {
 		return "", err
 	}
 
-	if customPrompt == "" {
-		// No custom prompt, return default only
-		return defaultPrompt, nil
+	// Build the complete prompt
+	var result string
+	result = defaultPrompt
+
+	// Add CLI documentation
+	if cliDocs != "" {
+		result += fmt.Sprintf("\n\n---\n\n%s", cliDocs)
 	}
 
-	// Combine default and custom prompts
-	return fmt.Sprintf("%s\n\n---\n\nRepository-specific instructions:\n\n%s", defaultPrompt, customPrompt), nil
+	// Add custom prompt if it exists
+	if customPrompt != "" {
+		result += fmt.Sprintf("\n\n---\n\nRepository-specific instructions:\n\n%s", customPrompt)
+	}
+
+	return result, nil
 }

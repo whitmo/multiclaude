@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dlorenc/multiclaude/internal/logging"
@@ -180,7 +181,9 @@ func (d *Daemon) checkAgentHealth() {
 
 	deadAgents := make(map[string][]string) // repo -> []agent names
 
-	for repoName, repo := range d.state.Repos {
+	// Get a snapshot of repos to avoid concurrent map access
+	repos := d.state.GetAllRepos()
+	for repoName, repo := range repos {
 		// Check if tmux session exists
 		hasSession, err := d.tmux.HasSession(repo.TmuxSession)
 		if err != nil {
@@ -202,6 +205,16 @@ func (d *Daemon) checkAgentHealth() {
 
 		// Check each agent
 		for agentName, agent := range repo.Agents {
+			// Check if agent is marked as ready for cleanup
+			if agent.ReadyForCleanup {
+				d.logger.Info("Agent %s is ready for cleanup", agentName)
+				if deadAgents[repoName] == nil {
+					deadAgents[repoName] = []string{}
+				}
+				deadAgents[repoName] = append(deadAgents[repoName], agentName)
+				continue
+			}
+
 			// Check if window exists
 			hasWindow, err := d.tmux.HasWindow(repo.TmuxSession, agent.TmuxWindow)
 			if err != nil {
@@ -264,8 +277,11 @@ func (d *Daemon) routeMessages() {
 	// Get messages manager
 	msgMgr := d.getMessageManager()
 
+	// Get a snapshot of repos to avoid concurrent map access
+	repos := d.state.GetAllRepos()
+
 	// Check each repository
-	for repoName, repo := range d.state.Repos {
+	for repoName, repo := range repos {
 		// Check each agent for messages
 		for agentName, agent := range repo.Agents {
 			// Get unread messages (pending or delivered but not yet read)
@@ -285,9 +301,16 @@ func (d *Daemon) routeMessages() {
 				// Format message for delivery
 				messageText := fmt.Sprintf("📨 Message from %s: %s", msg.From, msg.Body)
 
-				// Send via tmux
-				if err := d.tmux.SendKeys(repo.TmuxSession, agent.TmuxWindow, messageText); err != nil {
-					d.logger.Error("Failed to deliver message %s to %s/%s: %v", msg.ID, repoName, agentName, err)
+				// Send via tmux using literal mode to avoid escaping issues
+				// First send the text literally, then send Enter
+				if err := d.tmux.SendKeysLiteral(repo.TmuxSession, agent.TmuxWindow, messageText); err != nil {
+					d.logger.Error("Failed to deliver message text %s to %s/%s: %v", msg.ID, repoName, agentName, err)
+					continue
+				}
+
+				// Send Enter key to submit the message
+				if err := d.tmux.SendEnter(repo.TmuxSession, agent.TmuxWindow); err != nil {
+					d.logger.Error("Failed to send Enter for message %s to %s/%s: %v", msg.ID, repoName, agentName, err)
 					continue
 				}
 
@@ -332,7 +355,10 @@ func (d *Daemon) wakeAgents() {
 	d.logger.Debug("Waking agents")
 
 	now := time.Now()
-	for repoName, repo := range d.state.Repos {
+
+	// Get a snapshot of repos to avoid concurrent map access
+	repos := d.state.GetAllRepos()
+	for repoName, repo := range repos {
 		for agentName, agent := range repo.Agents {
 			// Skip if nudged recently (within last 2 minutes)
 			if !agent.LastNudge.IsZero() && now.Sub(agent.LastNudge) < 2*time.Minute {
@@ -350,8 +376,13 @@ func (d *Daemon) wakeAgents() {
 				message = "Status check: Update on your progress?"
 			}
 
-			if err := d.tmux.SendKeys(repo.TmuxSession, agent.TmuxWindow, message); err != nil {
-				d.logger.Error("Failed to wake agent %s: %v", agentName, err)
+			// Send message using literal mode to avoid escaping issues
+			if err := d.tmux.SendKeysLiteral(repo.TmuxSession, agent.TmuxWindow, message); err != nil {
+				d.logger.Error("Failed to send wake message to agent %s: %v", agentName, err)
+				continue
+			}
+			if err := d.tmux.SendEnter(repo.TmuxSession, agent.TmuxWindow); err != nil {
+				d.logger.Error("Failed to send Enter for wake message to agent %s: %v", agentName, err)
 				continue
 			}
 
@@ -614,6 +645,28 @@ func (d *Daemon) handleCompleteAgent(req socket.Request) socket.Response {
 	}
 
 	d.logger.Info("Agent %s/%s marked as ready for cleanup", repoName, agentName)
+
+	// Notify supervisor that worker completed
+	if agent.Type == state.AgentTypeWorker {
+		msgMgr := d.getMessageManager()
+		task := agent.Task
+		if task == "" {
+			task = "unknown task"
+		}
+		messageBody := fmt.Sprintf("Worker '%s' has completed its task: %s", agentName, task)
+
+		if _, err := msgMgr.Send(repoName, agentName, "supervisor", messageBody); err != nil {
+			d.logger.Error("Failed to send completion message to supervisor: %v", err)
+		} else {
+			d.logger.Info("Sent completion notification to supervisor for worker %s", agentName)
+			// Trigger immediate message delivery
+			go d.routeMessages()
+		}
+	}
+
+	// Trigger immediate cleanup check
+	go d.checkAgentHealth()
+
 	return socket.Response{Success: true}
 }
 
@@ -637,8 +690,11 @@ func (d *Daemon) handleRepairState(req socket.Request) socket.Response {
 	agentsRemoved := 0
 	issuesFixed := 0
 
+	// Get a snapshot of repos to avoid concurrent map access
+	repos := d.state.GetAllRepos()
+
 	// Check all agents and verify resources exist
-	for repoName, repo := range d.state.Repos {
+	for repoName, repo := range repos {
 		// Check tmux session
 		hasSession, err := d.tmux.HasSession(repo.TmuxSession)
 		if err != nil {
@@ -685,7 +741,8 @@ func (d *Daemon) handleRepairState(req socket.Request) socket.Response {
 
 	// Clean up orphaned message directories
 	msgMgr := d.getMessageManager()
-	for repoName := range d.state.Repos {
+	repoNames := d.state.ListRepos()
+	for _, repoName := range repoNames {
 		validAgents, _ := d.state.ListAgents(repoName)
 		if count, err := msgMgr.CleanupOrphaned(repoName, validAgents); err == nil && count > 0 {
 			issuesFixed += count
@@ -714,6 +771,20 @@ func (d *Daemon) cleanupDeadAgents(deadAgents map[string][]string) {
 				continue
 			}
 
+			// Get repo info for tmux session
+			repo, exists := d.state.GetRepo(repoName)
+			if !exists {
+				d.logger.Error("Failed to get repo %s for cleanup", repoName)
+				continue
+			}
+
+			// Kill tmux window
+			if err := d.tmux.KillWindow(repo.TmuxSession, agent.TmuxWindow); err != nil {
+				d.logger.Warn("Failed to kill tmux window %s: %v", agent.TmuxWindow, err)
+			} else {
+				d.logger.Info("Killed tmux window for agent %s: %s", agentName, agent.TmuxWindow)
+			}
+
 			// Remove from state
 			if err := d.state.RemoveAgent(repoName, agentName); err != nil {
 				d.logger.Error("Failed to remove agent %s/%s from state: %v", repoName, agentName, err)
@@ -721,15 +792,12 @@ func (d *Daemon) cleanupDeadAgents(deadAgents map[string][]string) {
 
 			// Clean up worktree if it exists
 			if agent.WorktreePath != "" && agent.Type == state.AgentTypeWorker {
-				repo, _ := d.state.GetRepo(repoName)
-				if repo != nil {
-					repoPath := d.paths.RepoDir(repoName)
-					wt := worktree.NewManager(repoPath)
-					if err := wt.Remove(agent.WorktreePath, true); err != nil {
-						d.logger.Warn("Failed to remove worktree %s: %v", agent.WorktreePath, err)
-					} else {
-						d.logger.Info("Removed worktree for dead agent: %s", agent.WorktreePath)
-					}
+				repoPath := d.paths.RepoDir(repoName)
+				wt := worktree.NewManager(repoPath)
+				if err := wt.Remove(agent.WorktreePath, true); err != nil {
+					d.logger.Warn("Failed to remove worktree %s: %v", agent.WorktreePath, err)
+				} else {
+					d.logger.Info("Removed worktree for dead agent: %s", agent.WorktreePath)
 				}
 			}
 
@@ -745,7 +813,8 @@ func (d *Daemon) cleanupDeadAgents(deadAgents map[string][]string) {
 
 // cleanupOrphanedWorktrees removes worktree directories without git tracking
 func (d *Daemon) cleanupOrphanedWorktrees() {
-	for repoName := range d.state.Repos {
+	repoNames := d.state.ListRepos()
+	for _, repoName := range repoNames {
 		repoPath := d.paths.RepoDir(repoName)
 		wtRootDir := d.paths.WorktreeDir(repoName)
 
@@ -782,8 +851,8 @@ func isProcessAlive(pid int) bool {
 		return false
 	}
 
-	// Send signal 0 to check if process exists
-	err = process.Signal(os.Signal(nil))
+	// Send signal 0 to check if process exists (doesn't actually signal, just checks)
+	err = process.Signal(syscall.Signal(0))
 	return err == nil
 }
 

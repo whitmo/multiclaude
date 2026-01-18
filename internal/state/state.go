@@ -139,6 +139,30 @@ func (s *State) ListRepos() []string {
 	return repos
 }
 
+// GetAllRepos returns a snapshot of all repositories
+// This is safe for iteration and won't cause concurrent map access issues
+func (s *State) GetAllRepos() map[string]*Repository {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Create a deep copy to avoid concurrent access issues
+	repos := make(map[string]*Repository, len(s.Repos))
+	for name, repo := range s.Repos {
+		// Copy the repository
+		repoCopy := &Repository{
+			GithubURL:   repo.GithubURL,
+			TmuxSession: repo.TmuxSession,
+			Agents:      make(map[string]Agent, len(repo.Agents)),
+		}
+		// Copy agents
+		for agentName, agent := range repo.Agents {
+			repoCopy.Agents[agentName] = agent
+		}
+		repos[name] = repoCopy
+	}
+	return repos
+}
+
 // AddAgent adds a new agent to a repository
 func (s *State) AddAgent(repoName, agentName string, agent Agent) error {
 	s.mu.Lock()
