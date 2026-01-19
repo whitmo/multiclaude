@@ -495,6 +495,15 @@ func (d *Daemon) handleRequest(req socket.Request) socket.Response {
 	case "update_repo_config":
 		return d.handleUpdateRepoConfig(req)
 
+	case "set_current_repo":
+		return d.handleSetCurrentRepo(req)
+
+	case "get_current_repo":
+		return d.handleGetCurrentRepo(req)
+
+	case "clear_current_repo":
+		return d.handleClearCurrentRepo(req)
+
 	case "route_messages":
 		go d.routeMessages()
 		return socket.Response{Success: true, Data: "Message routing triggered"}
@@ -1022,6 +1031,37 @@ func (d *Daemon) handleUpdateRepoConfig(req socket.Request) socket.Response {
 	}
 
 	d.logger.Info("Updated merge queue config for repo %s: enabled=%v, track=%s", name, currentConfig.Enabled, currentConfig.TrackMode)
+	return socket.Response{Success: true}
+}
+
+// handleSetCurrentRepo sets the current/default repository
+func (d *Daemon) handleSetCurrentRepo(req socket.Request) socket.Response {
+	name, ok := req.Args["name"].(string)
+	if !ok || name == "" {
+		return socket.Response{Success: false, Error: "missing or invalid 'name' argument"}
+	}
+
+	if err := d.state.SetCurrentRepo(name); err != nil {
+		return socket.Response{Success: false, Error: err.Error()}
+	}
+
+	d.logger.Info("Set current repo to: %s", name)
+	return socket.Response{Success: true, Data: name}
+}
+
+// handleGetCurrentRepo returns the current/default repository
+func (d *Daemon) handleGetCurrentRepo(req socket.Request) socket.Response {
+	currentRepo := d.state.GetCurrentRepo()
+	return socket.Response{Success: true, Data: currentRepo}
+}
+
+// handleClearCurrentRepo clears the current/default repository
+func (d *Daemon) handleClearCurrentRepo(req socket.Request) socket.Response {
+	if err := d.state.ClearCurrentRepo(); err != nil {
+		return socket.Response{Success: false, Error: err.Error()}
+	}
+
+	d.logger.Info("Cleared current repo")
 	return socket.Response{Success: true}
 }
 

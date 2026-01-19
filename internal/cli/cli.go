@@ -260,6 +260,27 @@ func (c *CLI) registerCommands() {
 		Run:         c.removeRepo,
 	}
 
+	repoCmd.Subcommands["use"] = &Command{
+		Name:        "use",
+		Description: "Set the current/default repository",
+		Usage:       "multiclaude repo use <name>",
+		Run:         c.setCurrentRepo,
+	}
+
+	repoCmd.Subcommands["current"] = &Command{
+		Name:        "current",
+		Description: "Show the current/default repository",
+		Usage:       "multiclaude repo current",
+		Run:         c.getCurrentRepo,
+	}
+
+	repoCmd.Subcommands["unset"] = &Command{
+		Name:        "unset",
+		Description: "Clear the current/default repository",
+		Usage:       "multiclaude repo unset",
+		Run:         c.clearCurrentRepo,
+	}
+
 	c.rootCmd.Subcommands["repo"] = repoCmd
 
 	// Worker commands
@@ -1162,6 +1183,69 @@ func (c *CLI) removeRepo(args []string) error {
 	return nil
 }
 
+func (c *CLI) setCurrentRepo(args []string) error {
+	if len(args) < 1 {
+		return errors.InvalidUsage("usage: multiclaude repo use <name>")
+	}
+
+	repoName := args[0]
+
+	client := socket.NewClient(c.paths.DaemonSock)
+	resp, err := client.Send(socket.Request{
+		Command: "set_current_repo",
+		Args: map[string]interface{}{
+			"name": repoName,
+		},
+	})
+	if err != nil {
+		return errors.DaemonCommunicationFailed("setting current repo", err)
+	}
+	if !resp.Success {
+		return errors.Wrap(errors.CategoryRuntime, "failed to set current repo", fmt.Errorf("%s", resp.Error))
+	}
+
+	fmt.Printf("Current repository set to: %s\n", repoName)
+	return nil
+}
+
+func (c *CLI) getCurrentRepo(args []string) error {
+	client := socket.NewClient(c.paths.DaemonSock)
+	resp, err := client.Send(socket.Request{
+		Command: "get_current_repo",
+	})
+	if err != nil {
+		return errors.DaemonCommunicationFailed("getting current repo", err)
+	}
+	if !resp.Success {
+		return errors.Wrap(errors.CategoryRuntime, "failed to get current repo", fmt.Errorf("%s", resp.Error))
+	}
+
+	currentRepo, _ := resp.Data.(string)
+	if currentRepo == "" {
+		fmt.Println("No current repository set")
+		fmt.Println("\nUse 'multiclaude repo use <name>' to set one")
+	} else {
+		fmt.Printf("Current repository: %s\n", currentRepo)
+	}
+	return nil
+}
+
+func (c *CLI) clearCurrentRepo(args []string) error {
+	client := socket.NewClient(c.paths.DaemonSock)
+	resp, err := client.Send(socket.Request{
+		Command: "clear_current_repo",
+	})
+	if err != nil {
+		return errors.DaemonCommunicationFailed("clearing current repo", err)
+	}
+	if !resp.Success {
+		return errors.Wrap(errors.CategoryRuntime, "failed to clear current repo", fmt.Errorf("%s", resp.Error))
+	}
+
+	fmt.Println("Current repository cleared")
+	return nil
+}
+
 func (c *CLI) configRepo(args []string) error {
 	flags, posArgs := ParseFlags(args)
 
@@ -1313,30 +1397,10 @@ func (c *CLI) createWorker(args []string) error {
 		return errors.InvalidUsage("usage: multiclaude work <task description>")
 	}
 
-	// Determine repository (from flag or current directory)
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer from current directory
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("failed to get current directory: %w", err)
-		}
-
-		// Check if we're in a tracked repo
-		repos := c.getReposList()
-		for _, repo := range repos {
-			repoPath := c.paths.RepoDir(repo)
-			if strings.HasPrefix(cwd, repoPath) {
-				repoName = repo
-				break
-			}
-		}
-
-		if repoName == "" {
-			return errors.NotInRepo()
-		}
+	// Determine repository
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
 	}
 
 	// Generate worker name (Docker-style)
@@ -1487,16 +1551,9 @@ func (c *CLI) listWorkers(args []string) error {
 	flags, _ := ParseFlags(args)
 
 	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer repo from current working directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
 	}
 
 	client := socket.NewClient(c.paths.DaemonSock)
@@ -2060,16 +2117,9 @@ func (c *CLI) listWorkspaces(args []string) error {
 	flags, _ := ParseFlags(args)
 
 	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer repo from current working directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
 	}
 
 	client := socket.NewClient(c.paths.DaemonSock)
@@ -2159,16 +2209,9 @@ func (c *CLI) connectWorkspace(args []string) error {
 	flags, _ := ParseFlags(args[1:])
 
 	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer repo from current working directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
 	}
 
 	// Get workspace info
@@ -2466,6 +2509,35 @@ func (c *CLI) inferRepoFromCwd() (string, error) {
 	}
 
 	return "", fmt.Errorf("not in a multiclaude directory")
+}
+
+// resolveRepo determines the repository to use based on:
+// 1. Explicit --repo flag (highest priority)
+// 2. Current working directory (if in a multiclaude directory)
+// 3. Current repo set via 'multiclaude repo use' (lowest priority)
+func (c *CLI) resolveRepo(flags map[string]string) (string, error) {
+	// 1. Check explicit --repo flag
+	if r, ok := flags["repo"]; ok {
+		return r, nil
+	}
+
+	// 2. Try to infer from current working directory
+	if inferred, err := c.inferRepoFromCwd(); err == nil {
+		return inferred, nil
+	}
+
+	// 3. Check current repo from daemon
+	client := socket.NewClient(c.paths.DaemonSock)
+	resp, err := client.Send(socket.Request{
+		Command: "get_current_repo",
+	})
+	if err == nil && resp.Success {
+		if currentRepo, ok := resp.Data.(string); ok && currentRepo != "" {
+			return currentRepo, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not determine repository; use --repo flag or run 'multiclaude repo use <name>'")
 }
 
 // inferAgentContext infers the current agent and repo from working directory
@@ -3035,16 +3107,9 @@ func (c *CLI) attachAgent(args []string) error {
 	readOnly := flags["read-only"] == "true" || flags["r"] == "true"
 
 	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer repo from current working directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
 	}
 
 	// Get agent info to find tmux session and window
