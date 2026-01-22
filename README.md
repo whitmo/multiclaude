@@ -1,60 +1,105 @@
 # multiclaude
 
-A lightweight orchestrator for running multiple Claude Code agents on GitHub repositories.
+A lightweight orchestrator for running multiple Claude Code agents on
+GitHub repositories.
 
-multiclaude spawns and coordinates autonomous Claude Code instances that work together on your codebase. Each agent runs in its own tmux window with an isolated git worktree, making all work observable and interruptible at any time.
+multiclaude spawns and coordinates autonomous Claude Code instances that
+work together on your codebase. Each agent runs in its own tmux window
+with an isolated git worktree, making all work observable and
+interruptible at any time.
 
 ## Philosophy: The Brownian Ratchet
 
-multiclaude embraces a counterintuitive design principle: **chaos is fine, as long as we ratchet forward**.
+multiclaude embraces a counterintuitive design principle: **chaos is
+fine, as long as we ratchet forward**.
 
-In physics, a Brownian ratchet is a thought experiment where random molecular motion is converted into directed movement through a mechanism that allows motion in only one direction. multiclaude applies this principle to software development.
+In physics, a Brownian ratchet is a thought experiment where random
+molecular motion is converted into directed movement through a mechanism
+that allows motion in only one direction. multiclaude applies this
+principle to software development.
 
-**The Chaos**: Multiple autonomous agents work simultaneously on overlapping concerns. They may duplicate effort, create conflicting changes, or produce suboptimal solutions. This apparent disorder is not a bug—it's a feature. More attempts mean more chances for progress.
+**The Chaos**: Multiple autonomous agents work simultaneously on
+overlapping concerns. They may duplicate effort, create conflicting
+changes, or produce suboptimal solutions. This apparent disorder is not
+a bug—it's a feature. More attempts mean more chances for progress.
 
-**The Ratchet**: CI is the arbiter. If it passes, the code goes in. Every merged PR clicks the ratchet forward one notch. Progress is permanent—we never go backward. The merge queue agent serves as this ratchet mechanism, ensuring that any work meeting the CI bar gets incorporated.
+**The Ratchet**: CI is the arbiter. If it passes, the code goes in.
+Every merged PR clicks the ratchet forward one notch. Progress is
+permanent—we never go backward. The merge queue agent serves as this
+ratchet mechanism, ensuring that any work meeting the CI bar gets
+incorporated.
 
 **Why This Works**:
-- Agents don't need perfect coordination. Redundant work is cheaper than blocked work.
+- Agents don't need perfect coordination. Redundant work is cheaper than
+  blocked work.
 - Failed attempts cost nothing. Only successful attempts matter.
-- Incremental progress compounds. Many small PRs beat waiting for one perfect PR.
-- The system is antifragile. More agents mean more chaos but also more forward motion.
+- Incremental progress compounds. Many small PRs beat waiting for one
+  perfect PR.
+- The system is antifragile. More agents mean more chaos but also more
+  forward motion.
 
-This philosophy means we optimize for throughput of successful changes, not efficiency of individual agents. An agent that produces a mergeable PR has succeeded, even if another agent was working on the same thing.
+This philosophy means we optimize for throughput of successful changes,
+not efficiency of individual agents. An agent that produces a mergeable
+PR has succeeded, even if another agent was working on the same thing.
 
 ## Our Opinions
 
-multiclaude is intentionally opinionated. These aren't configuration options—they're core beliefs baked into how the system works:
+multiclaude is intentionally opinionated. These aren't configuration
+options—they're core beliefs baked into how the system works:
 
 ### CI is King
 
-CI is the source of truth. Period. If tests pass, the code can ship. If tests fail, the code doesn't ship. There's no "but the change looks right" or "I'm pretty sure it's fine." The automation decides.
+CI is the source of truth. Period. If tests pass, the code can ship. If
+tests fail, the code doesn't ship. There's no "but the change looks
+right" or "I'm pretty sure it's fine." The automation decides.
 
-Agents are forbidden from weakening CI to make their work pass. No skipping tests, no reducing coverage requirements, no "temporary" workarounds. If an agent can't pass CI, it asks for help or tries a different approach.
+Agents are forbidden from weakening CI to make their work pass. No
+skipping tests, no reducing coverage requirements, no "temporary"
+workarounds. If an agent can't pass CI, it asks for help or tries a
+different approach.
 
 ### Forward Progress Over Perfection
 
-Any incremental progress is good. A reviewable PR is progress. A partial implementation with tests is progress. The only failure is an agent that doesn't push the ball forward at all.
+Any incremental progress is good. A reviewable PR is progress. A partial
+implementation with tests is progress. The only failure is an agent that
+doesn't push the ball forward at all.
 
-This means we'd rather have three okay PRs than wait for one perfect PR. We'd rather merge working code now and improve it later than block on getting everything right the first time. Small, frequent commits beat large, infrequent ones.
+This means we'd rather have three okay PRs than wait for one perfect PR.
+We'd rather merge working code now and improve it later than block on
+getting everything right the first time. Small, frequent commits beat
+large, infrequent ones.
 
 ### Chaos is Expected
 
-Multiple agents working simultaneously will create conflicts, duplicate work, and occasionally step on each other's toes. This is fine. This is the plan.
+Multiple agents working simultaneously will create conflicts, duplicate
+work, and occasionally step on each other's toes. This is fine. This is
+the plan.
 
-Trying to perfectly coordinate agent work is both expensive and fragile. Instead, we let chaos happen and use CI as the ratchet that captures forward progress. Wasted work is cheap; blocked work is expensive.
+Trying to perfectly coordinate agent work is both expensive and fragile.
+Instead, we let chaos happen and use CI as the ratchet that captures
+forward progress. Wasted work is cheap; blocked work is expensive.
 
 ### Humans Approve, Agents Execute
 
-Agents do the work. Humans set the direction and approve the results. Agents should never make decisions that require human judgment—they should ask.
+Agents do the work. Humans set the direction and approve the results.
+Agents should never make decisions that require human judgment—they
+should ask.
 
-This means agents create PRs for human review. Agents ask the supervisor when they're stuck. Agents don't bypass review requirements or merge without appropriate approval. The merge queue agent can auto-merge, but only when CI passes and review requirements are met.
+This means agents create PRs for human review. Agents ask the supervisor
+when they're stuck. Agents don't bypass review requirements or merge
+without appropriate approval. The merge queue agent can auto-merge, but
+only when CI passes and review requirements are met.
 
 ## Gastown and multiclaude
 
-multiclaude was developed independently but shares similar goals with [Gastown](https://github.com/steveyegge/gastown), Steve Yegge's multi-agent orchestrator for Claude Code released in January 2026.
+multiclaude was developed independently but shares similar goals with
+[Gastown](https://github.com/steveyegge/gastown), Steve Yegge's
+multi-agent orchestrator for Claude Code released in January 2026.
 
-Both projects solve the same fundamental problem: coordinating multiple Claude Code instances working on a shared codebase. Both use Go, tmux for observability, and git worktrees for isolation. If you're evaluating multi-agent orchestrators, you should look at both.
+Both projects solve the same fundamental problem: coordinating multiple
+Claude Code instances working on a shared codebase. Both use Go, tmux
+for observability, and git worktrees for isolation. If you're evaluating
+multi-agent orchestrators, you should look at both.
 
 **Where they differ:**
 
@@ -67,23 +112,39 @@ Both projects solve the same fundamental problem: coordinating multiple Claude C
 | Philosophy | Minimal, Unix-style simplicity | Comprehensive orchestration system |
 | Maturity | Early development | More established, larger feature set |
 
-multiclaude aims to be a simpler, more lightweight alternative—the "worse is better" approach. If you need sophisticated orchestration features, work swarming, or built-in crash recovery, Gastown may be a better fit.
+multiclaude aims to be a simpler, more lightweight alternative—the
+"worse is better" approach. If you need sophisticated orchestration
+features, work swarming, or built-in crash recovery, Gastown may be a
+better fit.
 
 ### Remote-First: Software is an MMORPG
 
-The biggest philosophical difference: **multiclaude is designed for remote-first collaboration**.
+The biggest philosophical difference: **multiclaude is designed for
+remote-first collaboration**.
 
-Gastown treats agents as NPCs in a single-player game. You're the player, agents are your minions. This works great for solo development where you want to parallelize your own work.
+Gastown treats agents as NPCs in a single-player game. You're the
+player, agents are your minions. This works great for solo development
+where you want to parallelize your own work.
 
-multiclaude treats software engineering as an **MMORPG**. You're one player among many—some human, some AI. The workspace agent is your character, but other humans have their own workspaces. Workers are party members you spawn for quests. The supervisor coordinates the guild. The merge queue is the raid boss that decides what loot (code) makes it into the vault (main branch).
+multiclaude treats software engineering as an **MMORPG**. You're one
+player among many—some human, some AI. The workspace agent is your
+character, but other humans have their own workspaces. Workers are party
+members you spawn for quests. The supervisor coordinates the guild. The
+merge queue is the raid boss that decides what loot (code) makes it into
+the vault (main branch).
 
 This means:
-- **Your workspace persists**. It's your home base, not a temporary session.
-- **You interact with workers, not control them**. Spawn them with a task, check on them later.
+- **Your workspace persists**. It's your home base, not a temporary
+  session.
+- **You interact with workers, not control them**. Spawn them with a
+  task, check on them later.
 - **Other humans can have their own workspaces** on the same repo.
-- **The system keeps running when you're away**. Agents work, PRs merge, CI runs.
+- **The system keeps running when you're away**. Agents work, PRs merge,
+  CI runs.
 
-The workspace is where you hop in to spawn agents, check on progress, review what landed, and plan the next sprint—then hop out and let the system work while you sleep.
+The workspace is where you hop in to spawn agents, check on progress,
+review what landed, and plan the next sprint—then hop out and let the
+system work while you sleep.
 
 ## Quick Start
 
@@ -108,13 +169,18 @@ tmux attach -t mc-repo
 
 ## How It Works
 
-multiclaude creates a tmux session for each repository with three types of agents:
+multiclaude creates a tmux session for each repository with three types
+of agents:
 
-1. **Supervisor** - Coordinates all agents, answers status questions, nudges stuck workers
+1. **Supervisor** - Coordinates all agents, answers status questions,
+   nudges stuck workers
 2. **Workers** - Execute specific tasks, create PRs when done
-3. **Merge Queue** - Monitors PRs, merges when CI passes, spawns fixup workers as needed
+3. **Merge Queue** - Monitors PRs, merges when CI passes, spawns fixup
+   workers as needed
 
-Agents communicate via a filesystem-based message system. The daemon routes messages and periodically nudges agents to keep work moving forward.
+Agents communicate via a filesystem-based message system. The daemon
+routes messages and periodically nudges agents to keep work moving
+forward.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -155,7 +221,9 @@ multiclaude repo rm <name>                 # Remove a tracked repository
 
 ### Workspaces
 
-Workspaces are persistent Claude sessions where you interact with the codebase, spawn workers, and manage your development flow. Each workspace has its own git worktree, tmux window, and Claude instance.
+Workspaces are persistent Claude sessions where you interact with the
+codebase, spawn workers, and manage your development flow. Each
+workspace has its own git worktree, tmux window, and Claude instance.
 
 ```bash
 multiclaude workspace add <name>           # Create a new workspace
@@ -169,9 +237,12 @@ multiclaude workspace <name>               # Connect to workspace (shorthand)
 
 **Notes:**
 - Workspaces use the branch naming convention `workspace/<name>`
-- Workspace names follow git branch naming rules (no spaces, special characters, etc.)
-- A "default" workspace is created automatically when you run `multiclaude init`
-- Use `multiclaude attach <workspace-name>` as an alternative to `workspace connect`
+- Workspace names follow git branch naming rules (no spaces, special
+  characters, etc.)
+- A "default" workspace is created automatically when you run
+  `multiclaude init`
+- Use `multiclaude attach <workspace-name>` as an alternative to
+  `workspace connect`
 
 ### Workers
 
@@ -183,7 +254,9 @@ multiclaude work list                      # List active workers
 multiclaude work rm <name>                 # Remove worker (warns if uncommitted work)
 ```
 
-The `--push-to` flag creates a worker that pushes to an existing branch instead of creating a new PR. Use this when you want to iterate on an existing PR.
+The `--push-to` flag creates a worker that pushes to an existing branch
+instead of creating a new PR. Use this when you want to iterate on an
+existing PR.
 
 ### Observing
 
@@ -216,7 +289,8 @@ Agents have access to multiclaude-specific slash commands:
 
 ### What the tmux Session Looks Like
 
-When you attach to a repo's tmux session, you'll see multiple windows—one per agent:
+When you attach to a repo's tmux session, you'll see multiple
+windows—one per agent:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -251,7 +325,8 @@ Use standard tmux navigation:
 
 ### Workflow: Spawning Workers from Your Workspace
 
-Your workspace is a persistent Claude session where you can spawn and manage workers:
+Your workspace is a persistent Claude session where you can spawn and
+manage workers:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -302,7 +377,8 @@ Later, when you return:
 
 ### Watching the Supervisor
 
-The supervisor coordinates agents and provides status updates. Attach to watch it work:
+The supervisor coordinates agents and provides status updates. Attach to
+watch it work:
 
 ```bash
 multiclaude attach supervisor --read-only
@@ -390,11 +466,16 @@ When CI fails, the merge queue can spawn workers to fix it:
 
 ### Design Principles
 
-1. **Observable** - All agent activity visible via tmux. Attach anytime to watch or intervene.
-2. **Isolated** - Each agent works in its own git worktree. No interference between tasks.
-3. **Recoverable** - State persists to disk. Daemon recovers gracefully from crashes.
-4. **Safe** - Agents never weaken CI or bypass checks without human approval.
-5. **Simple** - Minimal abstractions. Filesystem for state, tmux for visibility, git for isolation.
+1. **Observable** - All agent activity visible via tmux. Attach anytime
+   to watch or intervene.
+2. **Isolated** - Each agent works in its own git worktree. No
+   interference between tasks.
+3. **Recoverable** - State persists to disk. Daemon recovers gracefully
+   from crashes.
+4. **Safe** - Agents never weaken CI or bypass checks without human
+   approval.
+5. **Simple** - Minimal abstractions. Filesystem for state, tmux for
+   visibility, git for isolation.
 
 ### Directory Structure
 
@@ -424,7 +505,8 @@ Repositories can include optional configuration in `.multiclaude/`:
 
 ## Public Libraries
 
-multiclaude includes two reusable Go packages that can be used independently of the orchestrator:
+multiclaude includes two reusable Go packages that can be used
+independently of the orchestrator:
 
 ### pkg/tmux - Programmatic tmux Interaction
 
@@ -432,11 +514,18 @@ multiclaude includes two reusable Go packages that can be used independently of 
 go get github.com/dlorenc/multiclaude/pkg/tmux
 ```
 
-Unlike existing Go tmux libraries ([gotmux](https://github.com/GianlucaP106/gotmux), [go-tmux](https://github.com/jubnzv/go-tmux)) that focus on workspace setup, this package provides features for **programmatic interaction with running CLI applications**:
+Unlike existing Go tmux libraries
+([gotmux](https://github.com/GianlucaP106/gotmux),
+[go-tmux](https://github.com/jubnzv/go-tmux)) that focus on workspace
+setup, this package provides features for **programmatic interaction
+with running CLI applications**:
 
-- **Multiline text via paste-buffer** - Send multi-line input atomically without triggering intermediate processing
-- **Pane PID extraction** - Monitor whether processes in panes are still alive
-- **pipe-pane output capture** - Capture all pane output to files for logging/analysis
+- **Multiline text via paste-buffer** - Send multi-line input atomically
+  without triggering intermediate processing
+- **Pane PID extraction** - Monitor whether processes in panes are still
+  alive
+- **pipe-pane output capture** - Capture all pane output to files for
+  logging/analysis
 
 ```go
 client := tmux.NewClient()
@@ -453,10 +542,13 @@ client.StartPipePane("session", "window", "/tmp/output.log")
 go get github.com/dlorenc/multiclaude/pkg/claude
 ```
 
-A library for launching and interacting with Claude Code instances in terminals:
+A library for launching and interacting with Claude Code instances in
+terminals:
 
-- **Terminal abstraction** - Works with tmux or custom terminal implementations
-- **Session management** - Automatic UUID session IDs and process tracking
+- **Terminal abstraction** - Works with tmux or custom terminal
+  implementations
+- **Session management** - Automatic UUID session IDs and process
+  tracking
 - **Output capture** - Route Claude output to files
 - **Multiline support** - Properly handles multi-line messages to Claude
 
