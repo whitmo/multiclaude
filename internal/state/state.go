@@ -89,6 +89,8 @@ type Agent struct {
 	Task            string    `json:"task,omitempty"`             // Only for workers
 	Summary         string    `json:"summary,omitempty"`          // Brief summary of work done (workers only)
 	FailureReason   string    `json:"failure_reason,omitempty"`   // Why the task failed (workers only)
+	PRURL           string    `json:"pr_url,omitempty"`           // Pull request URL if created (workers only)
+	PRNumber        int       `json:"pr_number,omitempty"`        // PR number for quick lookup (workers only)
 	CreatedAt       time.Time `json:"created_at"`
 	LastNudge       time.Time `json:"last_nudge,omitempty"`
 	ReadyForCleanup bool      `json:"ready_for_cleanup,omitempty"` // Only for workers

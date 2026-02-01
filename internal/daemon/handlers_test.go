@@ -541,6 +541,49 @@ func TestHandleCompleteAgentTableDriven(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "complete with PR info captures URL and number",
+			args: map[string]interface{}{
+				"repo":      "test-repo",
+				"agent":     "worker-agent",
+				"summary":   "Implemented feature X",
+				"pr_url":    "https://github.com/test/repo/pull/42",
+				"pr_number": float64(42),
+			},
+			setupState: func(s *state.State) {
+				s.AddRepo("test-repo", &state.Repository{
+					GithubURL:   "https://github.com/test/repo",
+					TmuxSession: "test-session",
+					Agents:      make(map[string]state.Agent),
+				})
+				s.AddAgent("test-repo", "worker-agent", state.Agent{
+					Type:       state.AgentTypeWorker,
+					TmuxWindow: "worker-window",
+					Task:       "implement feature X",
+					CreatedAt:  time.Now(),
+				})
+			},
+			wantSuccess: true,
+			checkState: func(t *testing.T, d *Daemon) {
+				agent, exists := d.state.GetAgent("test-repo", "worker-agent")
+				if !exists {
+					t.Error("Agent should still exist after complete")
+					return
+				}
+				if !agent.ReadyForCleanup {
+					t.Error("Agent should be marked as ready for cleanup")
+				}
+				if agent.Summary != "Implemented feature X" {
+					t.Errorf("Agent summary = %q, want %q", agent.Summary, "Implemented feature X")
+				}
+				if agent.PRURL != "https://github.com/test/repo/pull/42" {
+					t.Errorf("Agent PRURL = %q, want %q", agent.PRURL, "https://github.com/test/repo/pull/42")
+				}
+				if agent.PRNumber != 42 {
+					t.Errorf("Agent PRNumber = %d, want %d", agent.PRNumber, 42)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
