@@ -2861,7 +2861,7 @@ func (c *CLI) connectWorkspace(args []string) error {
 // validateWorkspaceName validates that a workspace name follows branch name restrictions
 func validateWorkspaceName(name string) error {
 	if name == "" {
-		return fmt.Errorf("workspace name cannot be empty")
+		return errors.InvalidWorkspaceName("name cannot be empty")
 	}
 
 	// Git branch name restrictions
@@ -2872,25 +2872,25 @@ func validateWorkspaceName(name string) error {
 	// - Cannot be "." or ".."
 
 	if name == "." || name == ".." {
-		return fmt.Errorf("workspace name cannot be '.' or '..'")
+		return errors.InvalidWorkspaceName("cannot be '.' or '..'")
 	}
 
 	if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "-") {
-		return fmt.Errorf("workspace name cannot start with '.' or '-'")
+		return errors.InvalidWorkspaceName("cannot start with '.' or '-'")
 	}
 
 	if strings.HasSuffix(name, ".") || strings.HasSuffix(name, "/") {
-		return fmt.Errorf("workspace name cannot end with '.' or '/'")
+		return errors.InvalidWorkspaceName("cannot end with '.' or '/'")
 	}
 
 	if strings.Contains(name, "..") {
-		return fmt.Errorf("workspace name cannot contain '..'")
+		return errors.InvalidWorkspaceName("cannot contain '..'")
 	}
 
 	invalidChars := []string{"\\", "~", "^", ":", "?", "*", "[", "@", "{", "}", " ", "\t", "\n"}
 	for _, char := range invalidChars {
 		if strings.Contains(name, char) {
-			return fmt.Errorf("workspace name cannot contain '%s'", char)
+			return errors.InvalidWorkspaceName(fmt.Sprintf("cannot contain '%s'", char))
 		}
 	}
 
@@ -3579,7 +3579,7 @@ func (c *CLI) reviewPR(args []string) error {
 
 func (c *CLI) viewLogs(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: multiclaude logs <agent> [--lines N] [--follow]")
+		return errors.InvalidUsage("usage: multiclaude logs <agent> [--lines N] [--follow]")
 	}
 
 	agentName := args[0]
@@ -3592,12 +3592,12 @@ func (c *CLI) viewLogs(args []string) error {
 	} else {
 		repos := c.getReposList()
 		if len(repos) == 0 {
-			return fmt.Errorf("no repositories tracked")
+			return errors.NoRepositoriesFound()
 		}
 		if len(repos) == 1 {
 			repoName = repos[0]
 		} else {
-			return fmt.Errorf("multiple repos exist. Use --repo flag to specify which one")
+			return errors.MultipleRepos()
 		}
 	}
 
@@ -3611,7 +3611,7 @@ func (c *CLI) viewLogs(args []string) error {
 	} else if _, err := os.Stat(systemLogFile); err == nil {
 		logFile = systemLogFile
 	} else {
-		return fmt.Errorf("no log file found for agent %s in repo %s", agentName, repoName)
+		return errors.LogFileNotFound(agentName, repoName)
 	}
 
 	// Check for --follow flag
@@ -3722,7 +3722,7 @@ func (c *CLI) listLogsForRepo(repoName string) error {
 
 func (c *CLI) searchLogs(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: multiclaude logs search <pattern> [--repo <repo>]")
+		return errors.InvalidUsage("usage: multiclaude logs search <pattern> [--repo <repo>]")
 	}
 
 	pattern := args[0]
@@ -3779,13 +3779,13 @@ func (c *CLI) cleanLogs(args []string) error {
 
 	olderThan, ok := flags["older-than"]
 	if !ok {
-		return fmt.Errorf("usage: multiclaude logs clean --older-than <duration> (e.g., 7d, 24h)")
+		return errors.InvalidUsage("usage: multiclaude logs clean --older-than <duration> (e.g., 7d, 24h)")
 	}
 
 	// Parse duration
 	duration, err := parseDuration(olderThan)
 	if err != nil {
-		return fmt.Errorf("invalid duration: %v", err)
+		return errors.InvalidDuration(olderThan)
 	}
 
 	cutoff := time.Now().Add(-duration)
@@ -4578,22 +4578,22 @@ func (c *CLI) restartClaude(args []string) error {
 	// Infer agent context from cwd
 	repoName, agentName, err := c.inferAgentContext()
 	if err != nil {
-		return fmt.Errorf("cannot determine agent context: %w\n\nRun this command from within a multiclaude agent tmux window", err)
+		return errors.NotInAgentContext()
 	}
 
 	// Load state to get session ID
 	st, err := state.Load(c.paths.StateFile)
 	if err != nil {
-		return fmt.Errorf("failed to load state: %w", err)
+		return errors.Wrap(errors.CategoryRuntime, "failed to load state", err)
 	}
 
 	agent, exists := st.GetAgent(repoName, agentName)
 	if !exists {
-		return fmt.Errorf("agent '%s' not found in state for repo '%s'", agentName, repoName)
+		return errors.AgentNotInState(agentName, repoName)
 	}
 
 	if agent.SessionID == "" {
-		return fmt.Errorf("agent has no session ID - try removing and recreating the agent")
+		return errors.NoSessionID(agentName)
 	}
 
 	// Get the prompt file path (stored as ~/.multiclaude/prompts/<agent-name>.md)

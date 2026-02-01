@@ -307,16 +307,18 @@ func MissingArgument(argName, expectedType string) *CLIError {
 		msg = fmt.Sprintf("missing required argument: %s (%s)", argName, expectedType)
 	}
 	return &CLIError{
-		Category: CategoryUsage,
-		Message:  msg,
+		Category:   CategoryUsage,
+		Message:    msg,
+		Suggestion: "multiclaude --help",
 	}
 }
 
 // InvalidArgument creates an error for invalid argument values
 func InvalidArgument(argName, value, expected string) *CLIError {
 	return &CLIError{
-		Category: CategoryUsage,
-		Message:  fmt.Sprintf("invalid value for '%s': got '%s', expected %s", argName, value, expected),
+		Category:   CategoryUsage,
+		Message:    fmt.Sprintf("invalid value for '%s': got '%s', expected %s", argName, value, expected),
+		Suggestion: "multiclaude --help",
 	}
 }
 
@@ -380,5 +382,50 @@ func WorkspaceNotFound(name, repo string) *CLIError {
 		Category:   CategoryNotFound,
 		Message:    fmt.Sprintf("workspace '%s' not found in repo '%s'", name, repo),
 		Suggestion: fmt.Sprintf("multiclaude workspace list --repo %s", repo),
+	}
+}
+
+// InvalidWorkspaceName creates an error for invalid workspace names
+func InvalidWorkspaceName(reason string) *CLIError {
+	return &CLIError{
+		Category:   CategoryUsage,
+		Message:    fmt.Sprintf("invalid workspace name: %s", reason),
+		Suggestion: "workspace names follow git branch naming rules (no spaces, '..' or special characters)",
+	}
+}
+
+// LogFileNotFound creates an error for when an agent's log file cannot be found
+func LogFileNotFound(agent, repo string) *CLIError {
+	return &CLIError{
+		Category:   CategoryNotFound,
+		Message:    fmt.Sprintf("no log file found for agent '%s' in repo '%s'", agent, repo),
+		Suggestion: fmt.Sprintf("check agent exists: multiclaude worker list --repo %s", repo),
+	}
+}
+
+// AgentNotInState creates an error for when an agent is not found in state
+func AgentNotInState(agent, repo string) *CLIError {
+	return &CLIError{
+		Category:   CategoryNotFound,
+		Message:    fmt.Sprintf("agent '%s' not found in state for repo '%s'", agent, repo),
+		Suggestion: "the agent may have been removed; try recreating it",
+	}
+}
+
+// NoSessionID creates an error for when an agent has no session ID
+func NoSessionID(agent string) *CLIError {
+	return &CLIError{
+		Category:   CategoryConfig,
+		Message:    fmt.Sprintf("agent '%s' has no session ID", agent),
+		Suggestion: "try removing and recreating the agent",
+	}
+}
+
+// InvalidDuration creates an error for invalid duration strings
+func InvalidDuration(value string) *CLIError {
+	return &CLIError{
+		Category:   CategoryUsage,
+		Message:    fmt.Sprintf("invalid duration: %s", value),
+		Suggestion: "use format like '7d', '24h', or '30m' (days, hours, minutes)",
 	}
 }
