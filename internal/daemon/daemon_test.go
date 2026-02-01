@@ -181,6 +181,69 @@ func TestCleanupDeadAgents(t *testing.T) {
 	}
 }
 
+func TestCleanupDeadAgentsCleansConfigDir(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	// Add a test repository
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "test-session",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	// Add a test agent
+	agent := state.Agent{
+		Type:         state.AgentTypeWorker,
+		WorktreePath: "/tmp/nonexistent-worktree", // Fake path - worktree cleanup will warn but continue
+		TmuxWindow:   "test-window",
+		SessionID:    "test-session-id",
+		CreatedAt:    time.Now(),
+	}
+	if err := d.state.AddAgent("test-repo", "test-agent", agent); err != nil {
+		t.Fatalf("Failed to add agent: %v", err)
+	}
+
+	// Create the agent's Claude config directory
+	agentConfigDir := d.paths.AgentClaudeConfigDir("test-repo", "test-agent")
+	if err := os.MkdirAll(agentConfigDir, 0755); err != nil {
+		t.Fatalf("Failed to create agent config dir: %v", err)
+	}
+
+	// Create a dummy file in the config dir
+	dummyFile := filepath.Join(agentConfigDir, "test.md")
+	if err := os.WriteFile(dummyFile, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to create dummy file: %v", err)
+	}
+
+	// Verify config dir exists
+	if _, err := os.Stat(agentConfigDir); os.IsNotExist(err) {
+		t.Fatal("Agent config dir should exist before cleanup")
+	}
+
+	// Mark agent as dead
+	deadAgents := map[string][]string{
+		"test-repo": {"test-agent"},
+	}
+
+	// Call cleanup
+	d.cleanupDeadAgents(deadAgents)
+
+	// Verify agent was removed from state
+	_, exists := d.state.GetAgent("test-repo", "test-agent")
+	if exists {
+		t.Error("Agent should not exist after cleanup")
+	}
+
+	// Verify config dir was removed
+	if _, err := os.Stat(agentConfigDir); !os.IsNotExist(err) {
+		t.Error("Agent config dir should not exist after cleanup")
+	}
+}
+
 func TestHandleCompleteAgent(t *testing.T) {
 	d, cleanup := setupTestDaemon(t)
 	defer cleanup()
