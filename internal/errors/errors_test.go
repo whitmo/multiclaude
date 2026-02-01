@@ -577,3 +577,135 @@ func TestWorkspaceNotFound(t *testing.T) {
 		t.Errorf("expected workspace list suggestion, got: %s", formatted)
 	}
 }
+
+func TestInvalidWorkspaceName(t *testing.T) {
+	err := InvalidWorkspaceName("cannot contain spaces")
+
+	if err.Category != CategoryUsage {
+		t.Errorf("expected CategoryUsage, got %v", err.Category)
+	}
+	if err.Suggestion == "" {
+		t.Error("should have a suggestion")
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "invalid workspace name") {
+		t.Errorf("expected 'invalid workspace name' in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "cannot contain spaces") {
+		t.Errorf("expected reason in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "branch naming") {
+		t.Errorf("expected branch naming hint in suggestion, got: %s", formatted)
+	}
+}
+
+func TestLogFileNotFound(t *testing.T) {
+	err := LogFileNotFound("worker-1", "my-repo")
+
+	if err.Category != CategoryNotFound {
+		t.Errorf("expected CategoryNotFound, got %v", err.Category)
+	}
+	if err.Suggestion == "" {
+		t.Error("should have a suggestion")
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "worker-1") {
+		t.Errorf("expected agent name in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "my-repo") {
+		t.Errorf("expected repo name in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "multiclaude worker list") {
+		t.Errorf("expected worker list suggestion, got: %s", formatted)
+	}
+}
+
+func TestAgentNotInState(t *testing.T) {
+	err := AgentNotInState("worker-1", "my-repo")
+
+	if err.Category != CategoryNotFound {
+		t.Errorf("expected CategoryNotFound, got %v", err.Category)
+	}
+	if err.Suggestion == "" {
+		t.Error("should have a suggestion")
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "worker-1") {
+		t.Errorf("expected agent name in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "my-repo") {
+		t.Errorf("expected repo name in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "recreating") {
+		t.Errorf("expected recreating hint in suggestion, got: %s", formatted)
+	}
+}
+
+func TestNoSessionID(t *testing.T) {
+	err := NoSessionID("worker-1")
+
+	if err.Category != CategoryConfig {
+		t.Errorf("expected CategoryConfig, got %v", err.Category)
+	}
+	if err.Suggestion == "" {
+		t.Error("should have a suggestion")
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "worker-1") {
+		t.Errorf("expected agent name in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "session ID") {
+		t.Errorf("expected 'session ID' in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "recreating") {
+		t.Errorf("expected recreating hint in suggestion, got: %s", formatted)
+	}
+}
+
+func TestInvalidDuration(t *testing.T) {
+	err := InvalidDuration("abc")
+
+	if err.Category != CategoryUsage {
+		t.Errorf("expected CategoryUsage, got %v", err.Category)
+	}
+	if err.Suggestion == "" {
+		t.Error("should have a suggestion")
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "invalid duration") {
+		t.Errorf("expected 'invalid duration' in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "abc") {
+		t.Errorf("expected value in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "7d") {
+		t.Errorf("expected example format in suggestion, got: %s", formatted)
+	}
+}
+
+func TestMissingArgumentHasSuggestion(t *testing.T) {
+	err := MissingArgument("filename", "string")
+
+	if err.Suggestion == "" {
+		t.Error("MissingArgument should have a suggestion")
+	}
+	if !strings.Contains(err.Suggestion, "--help") {
+		t.Errorf("expected --help in suggestion, got: %s", err.Suggestion)
+	}
+}
+
+func TestInvalidArgumentHasSuggestion(t *testing.T) {
+	err := InvalidArgument("count", "abc", "integer")
+
+	if err.Suggestion == "" {
+		t.Error("InvalidArgument should have a suggestion")
+	}
+	if !strings.Contains(err.Suggestion, "--help") {
+		t.Errorf("expected --help in suggestion, got: %s", err.Suggestion)
+	}
+}
