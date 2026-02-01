@@ -984,12 +984,18 @@ func (d *Daemon) handleCompleteAgent(req socket.Request) socket.Response {
 	// Mark as ready for cleanup
 	agent.ReadyForCleanup = true
 
-	// Optional: capture summary and failure reason for task history
+	// Optional: capture summary, failure reason, and PR info for task history
 	if summary, ok := req.Args["summary"].(string); ok && summary != "" {
 		agent.Summary = summary
 	}
 	if failureReason, ok := req.Args["failure_reason"].(string); ok && failureReason != "" {
 		agent.FailureReason = failureReason
+	}
+	if prURL, ok := req.Args["pr_url"].(string); ok && prURL != "" {
+		agent.PRURL = prURL
+	}
+	if prNumber, ok := req.Args["pr_number"].(float64); ok && prNumber > 0 {
+		agent.PRNumber = int(prNumber)
 	}
 
 	if err := d.state.UpdateAgent(repoName, agentName, agent); err != nil {
@@ -1387,17 +1393,24 @@ func (d *Daemon) recordTaskHistory(repoName, agentName string, agent state.Agent
 		}
 	}
 
-	// Determine initial status
+	// Determine initial status based on failure reason and PR info
 	status := state.TaskStatusUnknown
 	if agent.FailureReason != "" {
 		status = state.TaskStatusFailed
+	} else if agent.PRURL != "" || agent.PRNumber > 0 {
+		// If a PR was created, mark as open (will be updated when queried)
+		status = state.TaskStatusOpen
+	} else {
+		status = state.TaskStatusNoPR
 	}
 
 	entry := state.TaskHistoryEntry{
 		Name:          agentName,
 		Task:          agent.Task,
 		Branch:        branch,
-		Status:        status, // Will be updated when displaying if a PR exists
+		PRURL:         agent.PRURL,
+		PRNumber:      agent.PRNumber,
+		Status:        status,
 		Summary:       agent.Summary,
 		FailureReason: agent.FailureReason,
 		CreatedAt:     agent.CreatedAt,
@@ -1407,7 +1420,13 @@ func (d *Daemon) recordTaskHistory(repoName, agentName string, agent state.Agent
 	if err := d.state.AddTaskHistory(repoName, entry); err != nil {
 		d.logger.Warn("Failed to record task history for %s: %v", agentName, err)
 	} else {
-		d.logger.Info("Recorded task history for %s (branch: %s, summary: %q)", agentName, branch, agent.Summary)
+		prInfo := ""
+		if agent.PRURL != "" {
+			prInfo = fmt.Sprintf(", pr: %s", agent.PRURL)
+		} else if agent.PRNumber > 0 {
+			prInfo = fmt.Sprintf(", pr: #%d", agent.PRNumber)
+		}
+		d.logger.Info("Recorded task history for %s (branch: %s, status: %s%s, summary: %q)", agentName, branch, status, prInfo, agent.Summary)
 	}
 }
 

@@ -431,7 +431,7 @@ func (c *CLI) registerCommands() {
 	agentCmd.Subcommands["complete"] = &Command{
 		Name:        "complete",
 		Description: "Signal worker completion",
-		Usage:       "multiclaude agent complete [--summary <text>] [--failure <reason>]",
+		Usage:       "multiclaude agent complete [--summary <text>] [--failure <reason>] [--pr-url <url>] [--pr-number <num>]",
 		Run:         c.completeWorker,
 	}
 
@@ -3339,6 +3339,20 @@ func (c *CLI) completeWorker(args []string) error {
 	if failureReason, ok := flags["failure"]; ok && failureReason != "" {
 		reqArgs["failure_reason"] = failureReason
 		fmt.Printf("Failure reason: %s\n", failureReason)
+	}
+
+	// Add optional PR URL
+	if prURL, ok := flags["pr-url"]; ok && prURL != "" {
+		reqArgs["pr_url"] = prURL
+		fmt.Printf("PR URL: %s\n", prURL)
+	}
+
+	// Add optional PR number
+	if prNumber, ok := flags["pr-number"]; ok && prNumber != "" {
+		if num, err := strconv.Atoi(prNumber); err == nil && num > 0 {
+			reqArgs["pr_number"] = num
+			fmt.Printf("PR Number: #%d\n", num)
+		}
 	}
 
 	client := socket.NewClient(c.paths.DaemonSock)
