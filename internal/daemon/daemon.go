@@ -1335,7 +1335,7 @@ func (d *Daemon) cleanupDeadAgents(deadAgents map[string][]string) {
 				d.logger.Error("Failed to remove agent %s/%s from state: %v", repoName, agentName, err)
 			}
 
-			// Clean up worktree if it exists (workers and review agents have worktrees)
+			// Clean up worktree and branch if they exist (workers and review agents have worktrees)
 			if agent.WorktreePath != "" && (agent.Type == state.AgentTypeWorker || agent.Type == state.AgentTypeReview) {
 				repoPath := d.paths.RepoDir(repoName)
 				wt := worktree.NewManager(repoPath)
@@ -1343,6 +1343,24 @@ func (d *Daemon) cleanupDeadAgents(deadAgents map[string][]string) {
 					d.logger.Warn("Failed to remove worktree %s: %v", agent.WorktreePath, err)
 				} else {
 					d.logger.Info("Removed worktree for dead agent: %s", agent.WorktreePath)
+				}
+
+				// Delete the branch (work/<agentName>) after worktree removal
+				branchName := "work/" + agentName
+				if err := wt.DeleteBranch(branchName); err != nil {
+					d.logger.Warn("Failed to delete branch %s: %v", branchName, err)
+				} else {
+					d.logger.Info("Deleted branch for dead agent: %s", branchName)
+				}
+			}
+
+			// Clean up per-agent Claude config directory
+			agentConfigDir := d.paths.AgentClaudeConfigDir(repoName, agentName)
+			if _, err := os.Stat(agentConfigDir); err == nil {
+				if err := os.RemoveAll(agentConfigDir); err != nil {
+					d.logger.Warn("Failed to remove agent config dir %s: %v", agentConfigDir, err)
+				} else {
+					d.logger.Info("Removed agent config dir: %s", agentConfigDir)
 				}
 			}
 
