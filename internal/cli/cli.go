@@ -467,6 +467,13 @@ func (c *CLI) registerCommands() {
 		Run:         c.repair,
 	}
 
+	c.rootCmd.Subcommands["refresh"] = &Command{
+		Name:        "refresh",
+		Description: "Sync agent worktrees with main branch",
+		Usage:       "multiclaude refresh",
+		Run:         c.refresh,
+	}
+
 	// Claude restart command - for resuming Claude after exit
 	c.rootCmd.Subcommands["claude"] = &Command{
 		Name:        "claude",
@@ -4583,6 +4590,151 @@ func (c *CLI) localRepair(verbose bool) error {
 		fmt.Println("  No issues found")
 	}
 
+	return nil
+}
+
+// refresh syncs agent worktrees with the main branch
+func (c *CLI) refresh(args []string) error {
+	fmt.Println("Syncing agent worktrees with main branch...")
+
+	// Check if daemon is running
+	client := socket.NewClient(c.paths.DaemonSock)
+	_, err := client.Send(socket.Request{Command: "ping"})
+	if err != nil {
+		// Daemon not running - do local refresh
+		fmt.Println("Daemon is not running. Performing local refresh...")
+		return c.localRefresh()
+	}
+
+	// Trigger worktree refresh via daemon
+	resp, err := client.Send(socket.Request{
+		Command: "refresh_worktrees",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to trigger refresh: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("refresh failed: %s", resp.Error)
+	}
+
+	// Display results
+	if data, ok := resp.Data.(map[string]interface{}); ok {
+		if refreshed, ok := data["refreshed"].([]interface{}); ok && len(refreshed) > 0 {
+			fmt.Printf("✓ Refreshed %d worktree(s):\n", len(refreshed))
+			for _, agent := range refreshed {
+				fmt.Printf("  - %s\n", agent)
+			}
+		}
+		if skipped, ok := data["skipped"].([]interface{}); ok && len(skipped) > 0 {
+			fmt.Printf("⊘ Skipped %d worktree(s):\n", len(skipped))
+			for _, item := range skipped {
+				if m, ok := item.(map[string]interface{}); ok {
+					agent := m["agent"]
+					reason := m["reason"]
+					fmt.Printf("  - %s: %s\n", agent, reason)
+				}
+			}
+		}
+		if errors, ok := data["errors"].([]interface{}); ok && len(errors) > 0 {
+			fmt.Printf("✗ Failed to refresh %d worktree(s):\n", len(errors))
+			for _, item := range errors {
+				if m, ok := item.(map[string]interface{}); ok {
+					agent := m["agent"]
+					errMsg := m["error"]
+					fmt.Printf("  - %s: %s\n", agent, errMsg)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// localRefresh performs worktree refresh without the daemon running
+func (c *CLI) localRefresh() error {
+	// Load state from disk
+	st, err := c.loadState()
+	if err != nil {
+		return err
+	}
+
+	refreshed := 0
+	skipped := 0
+	errCount := 0
+
+	repos := st.GetAllRepos()
+	for repoName, repo := range repos {
+		repoPath := c.paths.RepoDir(repoName)
+
+		// Check if repo path exists
+		if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+			continue
+		}
+
+		wt := worktree.NewManager(repoPath)
+
+		// Get the upstream remote and default branch
+		remote, err := wt.GetUpstreamRemote()
+		if err != nil {
+			continue
+		}
+
+		mainBranch, err := wt.GetDefaultBranch(remote)
+		if err != nil {
+			continue
+		}
+
+		// Fetch from remote
+		if err := wt.FetchRemote(remote); err != nil {
+			continue
+		}
+
+		// Check each worker agent's worktree
+		for agentName, agent := range repo.Agents {
+			// Only refresh worker worktrees
+			if agent.Type != state.AgentTypeWorker {
+				continue
+			}
+
+			// Skip if worktree path is empty or doesn't exist
+			if agent.WorktreePath == "" {
+				continue
+			}
+			if _, err := os.Stat(agent.WorktreePath); os.IsNotExist(err) {
+				continue
+			}
+
+			// Check worktree state
+			wtState, err := worktree.GetWorktreeState(agent.WorktreePath, remote, mainBranch)
+			if err != nil {
+				continue
+			}
+
+			// Skip if can't refresh
+			if !wtState.CanRefresh {
+				fmt.Printf("⊘ Skipping %s/%s: %s\n", repoName, agentName, wtState.RefreshReason)
+				skipped++
+				continue
+			}
+
+			// Refresh the worktree
+			fmt.Printf("Refreshing %s/%s (%d commits behind)...\n", repoName, agentName, wtState.CommitsBehind)
+			result := worktree.RefreshWorktree(agent.WorktreePath, remote, mainBranch)
+
+			if result.Error != nil {
+				fmt.Printf("✗ Failed to refresh %s/%s: %v\n", repoName, agentName, result.Error)
+				errCount++
+			} else if result.Skipped {
+				fmt.Printf("⊘ Skipped %s/%s: %s\n", repoName, agentName, result.SkipReason)
+				skipped++
+			} else {
+				fmt.Printf("✓ Refreshed %s/%s (rebased %d commits)\n", repoName, agentName, result.CommitsRebased)
+				refreshed++
+			}
+		}
+	}
+
+	fmt.Printf("\n✓ Refresh completed: %d refreshed, %d skipped, %d errors\n", refreshed, skipped, errCount)
 	return nil
 }
 

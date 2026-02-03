@@ -660,6 +660,9 @@ func (d *Daemon) handleRequest(req socket.Request) socket.Response {
 		go d.routeMessages()
 		return socket.Response{Success: true, Data: "Message routing triggered"}
 
+	case "refresh_worktrees":
+		return d.handleRefreshWorktrees(req)
+
 	case "task_history":
 		return d.handleTaskHistory(req)
 
@@ -1466,6 +1469,137 @@ func (d *Daemon) handleTaskHistory(req socket.Request) socket.Response {
 	}
 
 	return socket.Response{Success: true, Data: result}
+}
+
+// handleRefreshWorktrees triggers immediate worktree refresh for all repos
+func (d *Daemon) handleRefreshWorktrees(req socket.Request) socket.Response {
+	d.logger.Info("Manual worktree refresh triggered")
+
+	// Run refresh synchronously so we can report results
+	results := d.refreshWorktreesWithResults()
+
+	return socket.Response{
+		Success: true,
+		Data:    results,
+	}
+}
+
+// refreshWorktreesWithResults syncs worker worktrees and returns results
+func (d *Daemon) refreshWorktreesWithResults() map[string]interface{} {
+	results := map[string]interface{}{
+		"refreshed": []string{},
+		"skipped":   []map[string]string{},
+		"errors":    []map[string]string{},
+	}
+
+	refreshed := []string{}
+	skipped := []map[string]string{}
+	errors := []map[string]string{}
+
+	repos := d.state.GetAllRepos()
+	for repoName, repo := range repos {
+		repoPath := d.paths.RepoDir(repoName)
+
+		// Check if repo path exists
+		if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+			continue
+		}
+
+		wt := worktree.NewManager(repoPath)
+
+		// Get the upstream remote and default branch
+		remote, err := wt.GetUpstreamRemote()
+		if err != nil {
+			d.logger.Debug("Could not get remote for %s: %v", repoName, err)
+			continue
+		}
+
+		mainBranch, err := wt.GetDefaultBranch(remote)
+		if err != nil {
+			d.logger.Debug("Could not get default branch for %s: %v", repoName, err)
+			continue
+		}
+
+		// Fetch from remote to have latest state
+		if err := wt.FetchRemote(remote); err != nil {
+			d.logger.Debug("Could not fetch from remote for %s: %v", repoName, err)
+			continue
+		}
+
+		// Check each worker agent's worktree
+		for agentName, agent := range repo.Agents {
+			// Only refresh worker worktrees
+			if agent.Type != state.AgentTypeWorker {
+				continue
+			}
+
+			// Skip if worktree path is empty
+			if agent.WorktreePath == "" {
+				continue
+			}
+
+			// Check if worktree exists
+			if _, err := os.Stat(agent.WorktreePath); os.IsNotExist(err) {
+				continue
+			}
+
+			// Check worktree state
+			wtState, err := worktree.GetWorktreeState(agent.WorktreePath, remote, mainBranch)
+			if err != nil {
+				d.logger.Debug("Could not get worktree state for %s/%s: %v", repoName, agentName, err)
+				continue
+			}
+
+			// Skip if can't refresh
+			if !wtState.CanRefresh {
+				skipped = append(skipped, map[string]string{
+					"agent":  agentName,
+					"repo":   repoName,
+					"reason": wtState.RefreshReason,
+				})
+				continue
+			}
+
+			// Refresh the worktree
+			d.logger.Info("Refreshing worktree for %s/%s (%d commits behind)", repoName, agentName, wtState.CommitsBehind)
+			result := worktree.RefreshWorktree(agent.WorktreePath, remote, mainBranch)
+
+			if result.Error != nil {
+				errors = append(errors, map[string]string{
+					"agent": agentName,
+					"repo":  repoName,
+					"error": result.Error.Error(),
+				})
+				if result.HasConflicts {
+					d.logger.Warn("Worktree refresh for %s/%s has conflicts in: %v", repoName, agentName, result.ConflictFiles)
+				} else {
+					d.logger.Error("Failed to refresh worktree for %s/%s: %v", repoName, agentName, result.Error)
+				}
+			} else if result.Skipped {
+				skipped = append(skipped, map[string]string{
+					"agent":  agentName,
+					"repo":   repoName,
+					"reason": result.SkipReason,
+				})
+			} else {
+				refreshed = append(refreshed, fmt.Sprintf("%s/%s", repoName, agentName))
+				d.logger.Info("Refreshed worktree for %s/%s: rebased %d commits", repoName, agentName, result.CommitsRebased)
+
+				// Notify the agent that their worktree was refreshed
+				msgMgr := d.getMessageManager()
+				msg := fmt.Sprintf("Your worktree has been synced with main (rebased %d commits). Run 'git log --oneline -5' to see recent changes.", result.CommitsRebased)
+				if _, err := msgMgr.Send(repoName, "daemon", agentName, msg); err != nil {
+					d.logger.Debug("Could not send refresh notification to %s/%s: %v", repoName, agentName, err)
+				}
+			}
+		}
+	}
+
+	results["refreshed"] = refreshed
+	results["skipped"] = skipped
+	results["errors"] = errors
+
+	return results
 }
 
 // cleanupOrphanedWorktrees removes worktree directories without git tracking
