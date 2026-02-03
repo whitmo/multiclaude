@@ -904,7 +904,7 @@ func (c *CLI) initRepo(args []string) error {
 		case "assigned":
 			mqTrackMode = state.TrackModeAssigned
 		default:
-			return fmt.Errorf("invalid --mq-track value: %s (must be 'all', 'author', or 'assigned')", trackMode)
+			return errors.InvalidFlagValue("--mq-track", trackMode, []string{"all", "author", "assigned"})
 		}
 	}
 
@@ -942,7 +942,7 @@ func (c *CLI) initRepo(args []string) error {
 	// Create tmux session
 	tmuxSession := sanitizeTmuxSessionName(repoName)
 	if tmuxSession == "mc-" {
-		return fmt.Errorf("invalid tmux session name: repository name cannot be empty")
+		return errors.InvalidRepoName("cannot be empty")
 	}
 
 	fmt.Printf("Creating tmux session: %s\n", tmuxSession)
@@ -1533,17 +1533,17 @@ func (c *CLI) showRepoConfig(repoName string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get repo config: %w (is daemon running?)", err)
+		return errors.DaemonCommunicationFailed("getting repo config", err)
 	}
 
 	if !resp.Success {
-		return fmt.Errorf("failed to get repo config: %s", resp.Error)
+		return errors.Wrap(errors.CategoryRuntime, "failed to get repo config", fmt.Errorf("%s", resp.Error))
 	}
 
 	// Parse response
 	configMap, ok := resp.Data.(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("unexpected response format")
+		return errors.New(errors.CategoryRuntime, "unexpected response format from daemon")
 	}
 
 	fmt.Printf("Configuration for repository: %s\n\n", repoName)
@@ -1587,7 +1587,7 @@ func (c *CLI) updateRepoConfig(repoName string, flags map[string]string) error {
 		case "false":
 			updateArgs["mq_enabled"] = false
 		default:
-			return fmt.Errorf("invalid --mq-enabled value: %s (must be 'true' or 'false')", mqEnabled)
+			return errors.InvalidFlagValue("--mq-enabled", mqEnabled, []string{"true", "false"})
 		}
 	}
 
@@ -1596,7 +1596,7 @@ func (c *CLI) updateRepoConfig(repoName string, flags map[string]string) error {
 		case "all", "author", "assigned":
 			updateArgs["mq_track_mode"] = mqTrack
 		default:
-			return fmt.Errorf("invalid --mq-track value: %s (must be 'all', 'author', or 'assigned')", mqTrack)
+			return errors.InvalidFlagValue("--mq-track", mqTrack, []string{"all", "author", "assigned"})
 		}
 	}
 
@@ -1606,11 +1606,11 @@ func (c *CLI) updateRepoConfig(repoName string, flags map[string]string) error {
 		Args:    updateArgs,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to update repo config: %w (is daemon running?)", err)
+		return errors.DaemonCommunicationFailed("updating repo config", err)
 	}
 
 	if !resp.Success {
-		return fmt.Errorf("failed to update repo config: %s", resp.Error)
+		return errors.Wrap(errors.CategoryRuntime, "failed to update repo config", fmt.Errorf("%s", resp.Error))
 	}
 
 	fmt.Printf("Configuration updated for repository: %s\n", repoName)
@@ -2441,7 +2441,7 @@ func (c *CLI) addWorkspace(args []string) error {
 			agentType, _ := agentMap["type"].(string)
 			name, _ := agentMap["name"].(string)
 			if agentType == "workspace" && name == workspaceName {
-				return fmt.Errorf("workspace '%s' already exists in repo '%s'", workspaceName, repoName)
+				return errors.WorkspaceAlreadyExists(workspaceName, repoName)
 			}
 		}
 	}
@@ -2791,10 +2791,10 @@ func (c *CLI) connectWorkspace(args []string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get workspace info: %w (is daemon running?)", err)
+		return errors.DaemonCommunicationFailed("getting workspace info", err)
 	}
 	if !resp.Success {
-		return fmt.Errorf("failed to get workspace info: %s", resp.Error)
+		return errors.Wrap(errors.CategoryRuntime, "failed to get workspace info", fmt.Errorf("%s", resp.Error))
 	}
 
 	agents, _ := resp.Data.([]interface{})
@@ -3882,10 +3882,10 @@ func (c *CLI) attachAgent(args []string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get agent info: %w (is daemon running?)", err)
+		return errors.DaemonCommunicationFailed("getting agent info", err)
 	}
 	if !resp.Success {
-		return fmt.Errorf("failed to get agent info: %s", resp.Error)
+		return errors.Wrap(errors.CategoryRuntime, "failed to get agent info", fmt.Errorf("%s", resp.Error))
 	}
 
 	agents, _ := resp.Data.([]interface{})

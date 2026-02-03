@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dlorenc/multiclaude/internal/errors"
 	"github.com/dlorenc/multiclaude/internal/format"
 )
 
@@ -21,7 +22,7 @@ type SelectableItem struct {
 // If there's only one item, it's auto-selected without prompting.
 func SelectFromList(prompt string, items []SelectableItem) (string, error) {
 	if len(items) == 0 {
-		return "", fmt.Errorf("no items available")
+		return "", errors.NoItemsAvailable("")
 	}
 
 	// Auto-select if only one item
@@ -63,7 +64,7 @@ func SelectFromList(prompt string, items []SelectableItem) (string, error) {
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
 	if err != nil {
-		return "", fmt.Errorf("failed to read input: %w", err)
+		return "", errors.FailedToReadInput(err)
 	}
 
 	input = strings.TrimSpace(input)
@@ -76,12 +77,12 @@ func SelectFromList(prompt string, items []SelectableItem) (string, error) {
 	// Parse number
 	num, err := strconv.Atoi(input)
 	if err != nil {
-		return "", fmt.Errorf("invalid selection: %q is not a number", input)
+		return "", errors.InvalidSelection(input, len(items))
 	}
 
 	// Validate range
 	if num < 1 || num > len(items) {
-		return "", fmt.Errorf("invalid selection: %d is out of range (1-%d)", num, len(items))
+		return "", errors.SelectionOutOfRange(num, len(items))
 	}
 
 	return items[num-1].Name, nil
