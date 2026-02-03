@@ -1923,6 +1923,8 @@ func (c *CLI) listWorkers(args []string) error {
 			statusCell = format.ColorCell(format.ColoredStatus(format.StatusCompleted), nil)
 		case "stopped":
 			statusCell = format.ColorCell(format.ColoredStatus(format.StatusError), nil)
+		case "crashed":
+			statusCell = format.ColorCell(format.ColoredStatus(format.StatusCrashed), nil)
 		default:
 			statusCell = format.ColorCell(format.ColoredStatus(format.StatusIdle), nil)
 		}

@@ -20,6 +20,7 @@ const (
 	StatusWarning   Status = "warning"
 	StatusError     Status = "error"
 	StatusPending   Status = "pending"
+	StatusCrashed   Status = "crashed"
 )
 
 // Colors for different statuses
@@ -39,7 +40,7 @@ func StatusColor(status Status) *color.Color {
 		return Green
 	case StatusWarning, StatusIdle, StatusPending:
 		return Yellow
-	case StatusError:
+	case StatusError, StatusCrashed:
 		return Red
 	default:
 		return color.New()
@@ -59,6 +60,8 @@ func StatusIcon(status Status) string {
 		return "⚠"
 	case StatusError:
 		return "✗"
+	case StatusCrashed:
+		return "!"
 	case StatusPending:
 		return "◦"
 	default:
