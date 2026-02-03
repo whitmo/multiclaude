@@ -393,6 +393,14 @@ func (c *CLI) registerCommands() {
 		Run:         c.showHistory,
 	}
 
+	// Stats command
+	c.rootCmd.Subcommands["stats"] = &Command{
+		Name:        "stats",
+		Description: "Show agent activity statistics",
+		Usage:       "multiclaude stats [--repo <repo>]",
+		Run:         c.showStats,
+	}
+
 	// Agent commands (run from within Claude)
 	agentCmd := &Command{
 		Name:        "agent",
@@ -2169,6 +2177,209 @@ func (c *CLI) showHistory(args []string) error {
 	}
 
 	return nil
+}
+
+// showStats displays agent activity statistics
+func (c *CLI) showStats(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	// Determine repository
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
+	}
+
+	// Get all task history from daemon (use high limit to get all)
+	client := socket.NewClient(c.paths.DaemonSock)
+	historyResp, err := client.Send(socket.Request{
+		Command: "task_history",
+		Args: map[string]interface{}{
+			"repo":  repoName,
+			"limit": float64(1000), // Fetch all history
+		},
+	})
+	if err != nil {
+		return errors.DaemonCommunicationFailed("getting task history", err)
+	}
+
+	if !historyResp.Success {
+		return fmt.Errorf("failed to get task history: %s", historyResp.Error)
+	}
+
+	// Get daemon status for active agent count
+	statusResp, err := client.Send(socket.Request{
+		Command: "list_workers",
+		Args: map[string]interface{}{
+			"repo": repoName,
+		},
+	})
+
+	// Parse task history
+	entries, ok := historyResp.Data.([]interface{})
+	if !ok {
+		entries = []interface{}{}
+	}
+
+	// Calculate statistics
+	totalTasks := len(entries)
+	statusCounts := map[string]int{
+		"merged": 0,
+		"open":   0,
+		"closed": 0,
+		"failed": 0,
+		"no-pr":  0,
+	}
+
+	var totalDuration time.Duration
+	tasksWithDuration := 0
+	repoPath := c.paths.RepoDir(repoName)
+
+	for _, e := range entries {
+		entry, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		branch, _ := entry["branch"].(string)
+		prURL, _ := entry["pr_url"].(string)
+		storedStatus, _ := entry["status"].(string)
+
+		// Get PR status
+		prStatus, _ := c.getPRStatusForBranch(repoPath, branch, prURL)
+
+		// Use stored status if it indicates failure
+		if storedStatus == "failed" {
+			prStatus = "failed"
+		}
+		if prStatus == "" {
+			prStatus = "no-pr"
+		}
+
+		statusCounts[prStatus]++
+
+		// Calculate duration if both times exist
+		createdAtStr, _ := entry["created_at"].(string)
+		completedAtStr, _ := entry["completed_at"].(string)
+
+		if createdAtStr != "" && completedAtStr != "" {
+			createdAt, err1 := time.Parse(time.RFC3339, createdAtStr)
+			completedAt, err2 := time.Parse(time.RFC3339, completedAtStr)
+			if err1 == nil && err2 == nil && !completedAt.IsZero() {
+				duration := completedAt.Sub(createdAt)
+				if duration > 0 {
+					totalDuration += duration
+					tasksWithDuration++
+				}
+			}
+		}
+	}
+
+	// Count active agents
+	activeAgents := 0
+	if statusResp.Success {
+		if workers, ok := statusResp.Data.([]interface{}); ok {
+			for _, w := range workers {
+				if worker, ok := w.(map[string]interface{}); ok {
+					if status, _ := worker["status"].(string); status == "running" {
+						activeAgents++
+					}
+				}
+			}
+		}
+	}
+
+	// Calculate average duration
+	var avgDuration time.Duration
+	if tasksWithDuration > 0 {
+		avgDuration = totalDuration / time.Duration(tasksWithDuration)
+	}
+
+	// Display statistics
+	format.Header("Agent Statistics for '%s'", repoName)
+	fmt.Println()
+
+	// Summary section
+	fmt.Println("Summary:")
+	fmt.Printf("  Total tasks completed: %d\n", totalTasks)
+	fmt.Printf("  Active agents:         %d\n", activeAgents)
+	fmt.Println()
+
+	// PR status breakdown
+	fmt.Println("PR Status:")
+	table := format.NewColoredTable("Status", "Count", "Percentage")
+
+	prsCreated := statusCounts["merged"] + statusCounts["open"] + statusCounts["closed"]
+	addStatusRow := func(name string, count int) {
+		pct := 0.0
+		if totalTasks > 0 {
+			pct = float64(count) / float64(totalTasks) * 100
+		}
+		// Determine color based on status
+		var statusCell format.ColoredCell
+		switch name {
+		case "merged":
+			statusCell = format.ColorCell(name, format.Green)
+		case "open":
+			statusCell = format.ColorCell(name, format.Yellow)
+		case "closed", "failed":
+			statusCell = format.ColorCell(name, format.Red)
+		default:
+			statusCell = format.ColorCell(name, format.Dim)
+		}
+		table.AddRow(
+			statusCell,
+			format.Cell(fmt.Sprintf("%d", count)),
+			format.Cell(fmt.Sprintf("%.0f%%", pct)),
+		)
+	}
+
+	addStatusRow("merged", statusCounts["merged"])
+	addStatusRow("open", statusCounts["open"])
+	addStatusRow("closed", statusCounts["closed"])
+	addStatusRow("failed", statusCounts["failed"])
+	addStatusRow("no-pr", statusCounts["no-pr"])
+	table.Print()
+
+	// Time stats
+	if tasksWithDuration > 0 {
+		fmt.Println()
+		fmt.Println("Time Statistics:")
+		fmt.Printf("  Average task duration: %s\n", formatDuration(avgDuration))
+		fmt.Printf("  Total time spent:      %s\n", formatDuration(totalDuration))
+	}
+
+	// Success rate
+	if totalTasks > 0 {
+		fmt.Println()
+		fmt.Println("Success Metrics:")
+		prRate := float64(prsCreated) / float64(totalTasks) * 100
+		mergeRate := 0.0
+		if prsCreated > 0 {
+			mergeRate = float64(statusCounts["merged"]) / float64(prsCreated) * 100
+		}
+		fmt.Printf("  PR creation rate:      %.0f%% (%d/%d tasks)\n", prRate, prsCreated, totalTasks)
+		fmt.Printf("  PR merge rate:         %.0f%% (%d/%d PRs)\n", mergeRate, statusCounts["merged"], prsCreated)
+	}
+
+	return nil
+}
+
+// formatDuration formats a duration in a human-readable way
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	hours := int(d.Hours())
+	mins := int(d.Minutes()) % 60
+	if hours < 24 {
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	}
+	days := hours / 24
+	hours = hours % 24
+	return fmt.Sprintf("%dd %dh", days, hours)
 }
 
 // getPRStatusForBranch queries GitHub for the PR status of a branch
