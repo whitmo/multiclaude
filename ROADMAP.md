@@ -36,7 +36,7 @@ Focus: Make the core experience rock-solid before adding features.
 
 ### P1 - Should Have (this quarter)
 
-- [ ] **Task history**: Track what workers have done and their outcomes (PR merged/closed/pending)
+- [x] **Task history**: Track what workers have done and their outcomes (PR merged/closed/pending)
 - [ ] **Agent restart**: Gracefully restart crashed agents without losing context
 - [ ] **Workspace refresh**: Easy command to sync workspace with latest main
 
@@ -96,4 +96,5 @@ These features are explicitly **not wanted**. PRs implementing them should be cl
 
 ## Changelog
 
+- **2026-02-03**: Marked Task history as complete (P1)
 - **2026-01-20**: Initial roadmap after Phase 1 cleanup (removed notifications, coordination, multi-provider)
