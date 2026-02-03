@@ -305,8 +305,31 @@ func (d *Daemon) checkAgentHealth() {
 						} else {
 							d.logger.Info("Successfully restarted agent %s", agentName)
 						}
+					} else if agent.Type == state.AgentTypeWorker || agent.Type == state.AgentTypeReview {
+						// For workers/review agents, detect crash and notify supervisor
+						// Only notify once (when CrashedAt is not set)
+						if agent.CrashedAt.IsZero() {
+							d.logger.Info("Detected crashed worker %s, checking for uncommitted work", agentName)
+
+							// Check for uncommitted work
+							hasUncommitted := false
+							if agent.WorktreePath != "" {
+								if uncommitted, err := worktree.HasUncommittedChanges(agent.WorktreePath); err == nil {
+									hasUncommitted = uncommitted
+								} else {
+									d.logger.Warn("Failed to check uncommitted changes for %s: %v", agentName, err)
+								}
+							}
+
+							// Mark as crashed in state
+							if err := d.state.UpdateAgentCrashed(repoName, agentName, time.Now()); err != nil {
+								d.logger.Error("Failed to mark agent %s as crashed: %v", agentName, err)
+							}
+
+							// Notify supervisor about the crash
+							d.notifySupervisorOfCrash(repoName, agentName, agent, hasUncommitted)
+						}
 					}
-					// For transient agents (workers, review), don't auto-restart - they complete and clean up
 				}
 			}
 		}
@@ -925,11 +948,19 @@ func (d *Daemon) handleListAgents(req socket.Request) socket.Response {
 			status := "unknown"
 			if agent.ReadyForCleanup {
 				status = "completed"
+			} else if !agent.CrashedAt.IsZero() {
+				// Agent has been marked as crashed
+				status = "crashed"
 			} else if repoExists {
-				// Check if window exists (means agent is running)
+				// Check if window exists
 				hasWindow, err := d.tmux.HasWindow(d.ctx, repo.TmuxSession, agent.TmuxWindow)
 				if err == nil && hasWindow {
-					status = "running"
+					// Window exists, but also check if process is alive
+					if agent.PID > 0 && !isProcessAlive(agent.PID) {
+						status = "crashed"
+					} else {
+						status = "running"
+					}
 				} else {
 					status = "stopped"
 				}
@@ -1046,6 +1077,36 @@ func (d *Daemon) handleCompleteAgent(req socket.Request) socket.Response {
 	go d.checkAgentHealth()
 
 	return socket.Response{Success: true}
+}
+
+// notifySupervisorOfCrash sends a message to supervisor when a worker crashes
+func (d *Daemon) notifySupervisorOfCrash(repoName, agentName string, agent state.Agent, hasUncommitted bool) {
+	msgMgr := d.getMessageManager()
+
+	task := agent.Task
+	if task == "" {
+		task = "unknown task"
+	}
+
+	var message string
+	if hasUncommitted {
+		message = fmt.Sprintf("CRASHED: Worker '%s' has crashed with uncommitted work. Task: %s. "+
+			"The worktree is preserved. To restart: multiclaude agent restart %s --repo %s",
+			agentName, task, agentName, repoName)
+	} else {
+		message = fmt.Sprintf("CRASHED: Worker '%s' has crashed. Task: %s. "+
+			"No uncommitted work detected. To restart: multiclaude agent restart %s --repo %s",
+			agentName, task, agentName, repoName)
+	}
+
+	if _, err := msgMgr.Send(repoName, "daemon", "supervisor", message); err != nil {
+		d.logger.Error("Failed to send crash notification to supervisor: %v", err)
+	} else {
+		d.logger.Info("Sent crash notification to supervisor for worker %s", agentName)
+	}
+
+	// Trigger immediate message delivery
+	go d.routeMessages()
 }
 
 // handleRestartAgent restarts an agent that has crashed or exited
@@ -1926,6 +1987,11 @@ func (d *Daemon) restartAgent(repoName, agentName string, agent state.Agent, rep
 	// Update the agent's PID in state
 	if err := d.state.UpdateAgentPID(repoName, agentName, result.PID); err != nil {
 		d.logger.Warn("Failed to update agent PID: %v", err)
+	}
+
+	// Clear crashed state since agent is now running
+	if err := d.state.ClearAgentCrashed(repoName, agentName); err != nil {
+		d.logger.Warn("Failed to clear agent crashed state: %v", err)
 	}
 
 	d.logger.Info("Restarted agent %s with PID %d (resumed=%v)", agentName, result.PID, hasHistory)
