@@ -207,6 +207,33 @@ func (m *Manager) read(repoName, agentName, filename string) (*Message, error) {
 	return &msg, nil
 }
 
+// HasPending returns true if the agent has any pending (undelivered) messages
+func (m *Manager) HasPending(repoName, agentName string) bool {
+	dir := m.agentDir(repoName, agentName)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+
+		msg, err := m.read(repoName, agentName, entry.Name())
+		if err != nil {
+			continue
+		}
+
+		if msg.Status == StatusPending {
+			return true
+		}
+	}
+
+	return false
+}
+
 // CleanupOrphaned removes message directories for non-existent agents
 func (m *Manager) CleanupOrphaned(repoName string, validAgents []string) (int, error) {
 	repoDir := filepath.Join(m.messagesRoot, repoName)

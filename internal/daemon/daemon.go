@@ -419,11 +419,12 @@ func (d *Daemon) wakeLoop() {
 	}
 }
 
-// wakeAgents sends periodic nudges to agents
+// wakeAgents sends periodic nudges to agents, but only when they have work to do
 func (d *Daemon) wakeAgents() {
-	d.logger.Debug("Waking agents")
+	d.logger.Debug("Waking agents (selective)")
 
 	now := time.Now()
+	msgMgr := d.getMessageManager()
 
 	// Get a snapshot of repos to avoid concurrent map access
 	repos := d.state.GetAllRepos()
@@ -436,6 +437,13 @@ func (d *Daemon) wakeAgents() {
 
 			// Skip if nudged recently (within last 2 minutes)
 			if !agent.LastNudge.IsZero() && now.Sub(agent.LastNudge) < 2*time.Minute {
+				continue
+			}
+
+			// Selective wakeup: only wake agents that have work to do
+			reason := d.agentHasWork(repoName, agentName, agent, repo, msgMgr)
+			if reason == "" {
+				d.logger.Debug("Skipping wake for %s/%s: no work detected", repoName, agentName)
 				continue
 			}
 
@@ -464,9 +472,56 @@ func (d *Daemon) wakeAgents() {
 				d.logger.Error("Failed to update agent %s last nudge: %v", agentName, err)
 			}
 
-			d.logger.Debug("Woke agent %s in repo %s", agentName, repoName)
+			d.logger.Debug("Woke agent %s in repo %s (reason: %s)", agentName, repoName, reason)
 		}
 	}
+}
+
+// agentHasWork checks whether an agent has work that warrants a wake nudge.
+// Returns a reason string if there's work, or empty string if no work detected.
+func (d *Daemon) agentHasWork(repoName, agentName string, agent state.Agent, repo *state.Repository, msgMgr *messages.Manager) string {
+	// Any agent with pending messages has work
+	if msgMgr.HasPending(repoName, agentName) {
+		return "pending messages"
+	}
+
+	switch agent.Type {
+	case state.AgentTypeSupervisor:
+		// Supervisor has work when there are active workers to monitor
+		for _, a := range repo.Agents {
+			if a.Type == state.AgentTypeWorker && !a.ReadyForCleanup {
+				return "active workers"
+			}
+		}
+
+	case state.AgentTypeMergeQueue:
+		// Merge queue has work when there are workers with open PRs
+		for _, a := range repo.Agents {
+			if a.Type == state.AgentTypeWorker && a.PRURL != "" && !a.ReadyForCleanup {
+				return "open worker PRs"
+			}
+		}
+		// Also check task history for recent open PRs
+		history, err := d.state.GetTaskHistory(repoName, 10)
+		if err == nil {
+			for _, entry := range history {
+				if entry.Status == state.TaskStatusOpen && entry.PRURL != "" {
+					return "open PRs in history"
+				}
+			}
+		}
+
+	case state.AgentTypeWorker:
+		// Workers drive their own work - only wake for pending messages (checked above).
+		// No periodic nudge needed since workers are actively executing tasks.
+		return ""
+
+	case state.AgentTypeReview:
+		// Review agents drive their own work - only wake for pending messages (checked above).
+		return ""
+	}
+
+	return ""
 }
 
 // worktreeRefreshLoop periodically syncs worker worktrees with main branch

@@ -373,3 +373,37 @@ func TestCleanupOrphaned(t *testing.T) {
 		}
 	}
 }
+
+func TestHasPending(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "messages-haspending-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mgr := NewManager(tmpDir)
+	repoName := "test-repo"
+	agentName := "worker-1"
+
+	// No messages - should return false
+	if mgr.HasPending(repoName, agentName) {
+		t.Error("HasPending should return false when no messages exist")
+	}
+
+	// Send a message - should return true
+	msg, err := mgr.Send(repoName, "supervisor", agentName, "Hello")
+	if err != nil {
+		t.Fatalf("Failed to send message: %v", err)
+	}
+	if !mgr.HasPending(repoName, agentName) {
+		t.Error("HasPending should return true when pending messages exist")
+	}
+
+	// Mark as delivered - should return false (only pending counts)
+	if err := mgr.UpdateStatus(repoName, agentName, msg.ID, StatusDelivered); err != nil {
+		t.Fatalf("Failed to update status: %v", err)
+	}
+	if mgr.HasPending(repoName, agentName) {
+		t.Error("HasPending should return false when messages are delivered (not pending)")
+	}
+}
