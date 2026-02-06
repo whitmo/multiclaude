@@ -2531,4 +2531,106 @@ func TestFindRepoFromGitRemote(t *testing.T) {
 			t.Errorf("findRepoFromGitRemote() = %q, want %q", repoName, "repo-b")
 		}
 	})
+
+	t.Run("matches upstream remote for fork workflow", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		stateFile := filepath.Join(tmpDir, "state.json")
+
+		// Create state tracking the upstream repo URL
+		st := state.New(stateFile)
+		st.AddRepo("upstream-repo", &state.Repository{
+			GithubURL:   "https://github.com/upstream-org/upstream-repo",
+			TmuxSession: "mc-upstream-repo",
+			Agents:      make(map[string]state.Agent),
+		})
+
+		// Create a git repo simulating a fork:
+		// origin -> user's fork (doesn't match tracked repo)
+		// upstream -> original repo (matches tracked repo)
+		gitDir := filepath.Join(tmpDir, "git-test")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatalf("failed to create git dir: %v", err)
+		}
+		if err := os.Chdir(gitDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+
+		if err := exec.Command("git", "init").Run(); err != nil {
+			t.Fatalf("failed to init git: %v", err)
+		}
+		// origin points to user's fork (no match)
+		if err := exec.Command("git", "remote", "add", "origin", "git@github.com:myuser/upstream-repo.git").Run(); err != nil {
+			t.Fatalf("failed to add origin remote: %v", err)
+		}
+		// upstream points to tracked repo (should match)
+		if err := exec.Command("git", "remote", "add", "upstream", "git@github.com:upstream-org/upstream-repo.git").Run(); err != nil {
+			t.Fatalf("failed to add upstream remote: %v", err)
+		}
+
+		cli := &CLI{
+			paths: &config.Paths{
+				StateFile: stateFile,
+			},
+		}
+
+		repoName, err := cli.findRepoFromGitRemote()
+		if err != nil {
+			t.Fatalf("findRepoFromGitRemote() error: %v", err)
+		}
+		if repoName != "upstream-repo" {
+			t.Errorf("findRepoFromGitRemote() = %q, want %q", repoName, "upstream-repo")
+		}
+	})
+
+	t.Run("origin takes priority over upstream", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		stateFile := filepath.Join(tmpDir, "state.json")
+
+		// Create state with two repos
+		st := state.New(stateFile)
+		st.AddRepo("origin-repo", &state.Repository{
+			GithubURL:   "https://github.com/user/origin-repo",
+			TmuxSession: "mc-origin-repo",
+			Agents:      make(map[string]state.Agent),
+		})
+		st.AddRepo("upstream-repo", &state.Repository{
+			GithubURL:   "https://github.com/org/upstream-repo",
+			TmuxSession: "mc-upstream-repo",
+			Agents:      make(map[string]state.Agent),
+		})
+
+		// Create a git repo where both remotes match different tracked repos
+		gitDir := filepath.Join(tmpDir, "git-test")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatalf("failed to create git dir: %v", err)
+		}
+		if err := os.Chdir(gitDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+
+		if err := exec.Command("git", "init").Run(); err != nil {
+			t.Fatalf("failed to init git: %v", err)
+		}
+		if err := exec.Command("git", "remote", "add", "origin", "git@github.com:user/origin-repo.git").Run(); err != nil {
+			t.Fatalf("failed to add origin remote: %v", err)
+		}
+		if err := exec.Command("git", "remote", "add", "upstream", "git@github.com:org/upstream-repo.git").Run(); err != nil {
+			t.Fatalf("failed to add upstream remote: %v", err)
+		}
+
+		cli := &CLI{
+			paths: &config.Paths{
+				StateFile: stateFile,
+			},
+		}
+
+		repoName, err := cli.findRepoFromGitRemote()
+		if err != nil {
+			t.Fatalf("findRepoFromGitRemote() error: %v", err)
+		}
+		// origin should be checked first and win
+		if repoName != "origin-repo" {
+			t.Errorf("findRepoFromGitRemote() = %q, want %q (origin should take priority)", repoName, "origin-repo")
+		}
+	})
 }

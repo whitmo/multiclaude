@@ -1480,35 +1480,16 @@ func (c *CLI) clearCurrentRepo(args []string) error {
 func (c *CLI) configRepo(args []string) error {
 	flags, posArgs := ParseFlags(args)
 
-	// Determine repository
+	// Determine repository: positional arg takes priority, then resolveRepo fallback
 	var repoName string
 	if len(posArgs) >= 1 {
 		repoName = posArgs[0]
 	} else {
-		// Try to infer from current directory
-		cwd, err := os.Getwd()
+		resolved, err := c.resolveRepo(flags)
 		if err != nil {
-			return fmt.Errorf("failed to get current directory: %w", err)
+			return errors.NotInRepo()
 		}
-
-		// Check if we're in a tracked repo
-		repos := c.getReposList()
-		for _, repo := range repos {
-			repoPath := c.paths.RepoDir(repo)
-			if strings.HasPrefix(cwd, repoPath) {
-				repoName = repo
-				break
-			}
-		}
-
-		if repoName == "" {
-			// If only one repo exists, use it
-			if len(repos) == 1 {
-				repoName = repos[0]
-			} else {
-				return fmt.Errorf("please specify a repository name or run from within a tracked repository")
-			}
-		}
+		repoName = resolved
 	}
 
 	// Check if any config flags are provided
@@ -2399,16 +2380,9 @@ func (c *CLI) addWorkspace(args []string) error {
 	}
 
 	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer from current directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
 	}
 
 	// Determine branch to start from
@@ -3142,22 +3116,25 @@ func normalizeGitHubURL(url string) string {
 
 // findRepoFromGitRemote looks for a git remote in the current directory
 // and tries to match it against known repositories in state.
+// It checks both "origin" and "upstream" remotes to support fork workflows
+// where origin points to the user's fork and upstream points to the tracked repo.
 func (c *CLI) findRepoFromGitRemote() (string, error) {
-	// Run git remote get-url origin
-	cmd := exec.Command("git", "remote", "get-url", "origin")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get git remote: %w", err)
+	// Collect remote URLs from origin and upstream (covers fork workflows)
+	var remoteURLs []string
+	for _, remote := range []string{"origin", "upstream"} {
+		cmd := exec.Command("git", "remote", "get-url", remote)
+		output, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		url := strings.TrimSpace(string(output))
+		if url != "" {
+			remoteURLs = append(remoteURLs, url)
+		}
 	}
 
-	remoteURL := strings.TrimSpace(string(output))
-	if remoteURL == "" {
-		return "", fmt.Errorf("git remote URL is empty")
-	}
-
-	normalizedRemote := normalizeGitHubURL(remoteURL)
-	if normalizedRemote == "" {
-		return "", fmt.Errorf("not a GitHub URL: %s", remoteURL)
+	if len(remoteURLs) == 0 {
+		return "", fmt.Errorf("no git remotes found")
 	}
 
 	// Load state to check against known repositories
@@ -3166,20 +3143,27 @@ func (c *CLI) findRepoFromGitRemote() (string, error) {
 		return "", err
 	}
 
-	// Iterate through repos and find a match
-	for _, repoName := range st.ListRepos() {
-		repo, exists := st.GetRepo(repoName)
-		if !exists {
+	// Check each remote URL against tracked repos
+	for _, remoteURL := range remoteURLs {
+		normalizedRemote := normalizeGitHubURL(remoteURL)
+		if normalizedRemote == "" {
 			continue
 		}
 
-		normalizedStateURL := normalizeGitHubURL(repo.GithubURL)
-		if normalizedStateURL != "" && normalizedStateURL == normalizedRemote {
-			return repoName, nil
+		for _, repoName := range st.ListRepos() {
+			repo, exists := st.GetRepo(repoName)
+			if !exists {
+				continue
+			}
+
+			normalizedStateURL := normalizeGitHubURL(repo.GithubURL)
+			if normalizedStateURL != "" && normalizedStateURL == normalizedRemote {
+				return repoName, nil
+			}
 		}
 	}
 
-	return "", fmt.Errorf("no matching repository found for remote: %s", remoteURL)
+	return "", fmt.Errorf("no matching repository found for remotes: %v", remoteURLs)
 }
 
 // resolveRepo determines the repository to use based on:
@@ -3382,15 +3366,10 @@ func (c *CLI) restartAgentCmd(args []string) error {
 	}
 	agentName := remaining[0]
 
-	// Get repo from flag or infer from cwd
-	repoName := flags["repo"]
-	if repoName == "" {
-		// Try to infer from cwd
-		inferred, err := c.inferRepoFromCwd()
-		if err != nil {
-			return errors.InvalidUsage("could not determine repository - use --repo flag or run from within a multiclaude worktree")
-		}
-		repoName = inferred
+	// Get repo from flag or infer from context
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
 	}
 
 	force := flags["force"] == "true"
@@ -3449,31 +3428,11 @@ func (c *CLI) reviewPR(args []string) error {
 	prNumber := parts[4]
 	fmt.Printf("Reviewing PR #%s\n", prNumber)
 
-	// Determine repository from flag or current directory
+	// Determine repository from flag or current context
 	flags, _ := ParseFlags(args[1:])
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer from current directory
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("failed to get current directory: %w", err)
-		}
-
-		// Check if we're in a tracked repo
-		repos := c.getReposList()
-		for _, repo := range repos {
-			repoPath := c.paths.RepoDir(repo)
-			if strings.HasPrefix(cwd, repoPath) {
-				repoName = repo
-				break
-			}
-		}
-
-		if repoName == "" {
-			return errors.NotInRepo()
-		}
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
 	}
 
 	// Generate review agent name
@@ -3600,19 +3559,9 @@ func (c *CLI) viewLogs(args []string) error {
 	flags, _ := ParseFlags(args[1:])
 
 	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		repos := c.getReposList()
-		if len(repos) == 0 {
-			return errors.NoRepositoriesFound()
-		}
-		if len(repos) == 1 {
-			repoName = repos[0]
-		} else {
-			return errors.MultipleRepos()
-		}
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
 	}
 
 	// Determine if it's a worker or system agent by checking if it exists in workers dir
