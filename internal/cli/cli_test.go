@@ -2532,3 +2532,62 @@ func TestFindRepoFromGitRemote(t *testing.T) {
 		}
 	})
 }
+
+func TestCreateWorkerRollbackOnFailure(t *testing.T) {
+	// This test verifies that when worker creation fails after the worktree
+	// has been created, the rollback logic cleans up the orphaned worktree.
+	//
+	// We achieve this by pointing the CLI at a bad daemon socket so that
+	// the daemon communication step (after worktree creation) fails,
+	// triggering the deferred rollback.
+
+	os.Setenv("MULTICLAUDE_TEST_MODE", "1")
+	defer os.Unsetenv("MULTICLAUDE_TEST_MODE")
+
+	tmpDir, err := os.MkdirTemp("", "cli-rollback-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+	defer os.RemoveAll(tmpDir)
+
+	repoName := "test-repo"
+
+	paths := &config.Paths{
+		Root:            tmpDir,
+		DaemonPID:       filepath.Join(tmpDir, "daemon.pid"),
+		DaemonSock:      filepath.Join(tmpDir, "nonexistent.sock"), // Bad socket to force failure
+		DaemonLog:       filepath.Join(tmpDir, "daemon.log"),
+		StateFile:       filepath.Join(tmpDir, "state.json"),
+		ReposDir:        filepath.Join(tmpDir, "repos"),
+		WorktreesDir:    filepath.Join(tmpDir, "wts"),
+		MessagesDir:     filepath.Join(tmpDir, "messages"),
+		OutputDir:       filepath.Join(tmpDir, "output"),
+		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
+	}
+	if err := paths.EnsureDirectories(); err != nil {
+		t.Fatalf("Failed to create directories: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "prompts"), 0755); err != nil {
+		t.Fatalf("Failed to create prompts dir: %v", err)
+	}
+
+	// Set up a real git repo so worktree creation succeeds
+	repoPath := paths.RepoDir(repoName)
+	setupTestRepo(t, repoPath)
+
+	cli := NewWithPaths(paths)
+
+	// Attempt to create a worker — should fail at daemon communication
+	// but the worktree will have been created first
+	wtPath := paths.AgentWorktree(repoName, "rollback-test")
+	err = cli.Execute([]string{"work", "test rollback task", "--repo", repoName, "--name", "rollback-test"})
+	if err == nil {
+		t.Fatal("Expected worker creation to fail with bad daemon socket")
+	}
+
+	// Verify the worktree was cleaned up by the rollback
+	if _, statErr := os.Stat(wtPath); !os.IsNotExist(statErr) {
+		t.Errorf("Worktree at %s should have been removed by rollback, but still exists", wtPath)
+	}
+}
