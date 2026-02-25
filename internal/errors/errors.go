@@ -429,3 +429,77 @@ func InvalidDuration(value string) *CLIError {
 		Suggestion: "use format like '7d', '24h', or '30m' (days, hours, minutes)",
 	}
 }
+
+// InvalidFlagValue creates an error for invalid flag values with allowed options
+func InvalidFlagValue(flag, value string, allowed []string) *CLIError {
+	return &CLIError{
+		Category:   CategoryUsage,
+		Message:    fmt.Sprintf("invalid value '%s' for %s", value, flag),
+		Suggestion: fmt.Sprintf("allowed values: %s", strings.Join(allowed, ", ")),
+	}
+}
+
+// InvalidSelection creates an error for invalid user selection input
+func InvalidSelection(input string, maxNum int) *CLIError {
+	if maxNum > 0 {
+		return &CLIError{
+			Category:   CategoryUsage,
+			Message:    fmt.Sprintf("invalid selection: '%s'", input),
+			Suggestion: fmt.Sprintf("enter a number between 1 and %d, or press Enter to cancel", maxNum),
+		}
+	}
+	return &CLIError{
+		Category:   CategoryUsage,
+		Message:    fmt.Sprintf("invalid selection: '%s'", input),
+		Suggestion: "enter a valid number from the list",
+	}
+}
+
+// SelectionOutOfRange creates an error for selection numbers outside valid range
+func SelectionOutOfRange(num, maxNum int) *CLIError {
+	return &CLIError{
+		Category:   CategoryUsage,
+		Message:    fmt.Sprintf("selection %d is out of range", num),
+		Suggestion: fmt.Sprintf("enter a number between 1 and %d", maxNum),
+	}
+}
+
+// NoItemsAvailable creates an error when a selection list is empty
+func NoItemsAvailable(itemType string) *CLIError {
+	msg := "no items available for selection"
+	if itemType != "" {
+		msg = fmt.Sprintf("no %s available", itemType)
+	}
+	return &CLIError{
+		Category: CategoryNotFound,
+		Message:  msg,
+	}
+}
+
+// WorkspaceAlreadyExists creates an error when a workspace name is already taken
+func WorkspaceAlreadyExists(name, repo string) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("workspace '%s' already exists in repo '%s'", name, repo),
+		Suggestion: fmt.Sprintf("choose a different name, or remove existing workspace:\n  multiclaude workspace rm %s --repo %s", name, repo),
+	}
+}
+
+// InvalidRepoName creates an error for invalid or empty repository names
+func InvalidRepoName(reason string) *CLIError {
+	return &CLIError{
+		Category:   CategoryUsage,
+		Message:    fmt.Sprintf("invalid repository name: %s", reason),
+		Suggestion: "repository names must be non-empty and follow GitHub naming rules",
+	}
+}
+
+// FailedToReadInput creates an error for input reading failures
+func FailedToReadInput(cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    "failed to read input",
+		Cause:      cause,
+		Suggestion: "check terminal is interactive and try again",
+	}
+}
