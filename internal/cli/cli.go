@@ -1709,6 +1709,35 @@ func (c *CLI) createWorker(args []string) error {
 		}
 	}
 
+	// Track created resources for rollback on failure.
+	// If any step after worktree creation fails, we clean up everything
+	// that was created so far to avoid orphaned worktrees/windows.
+	var tmuxSession string
+	var tmuxWindowCreated bool
+	var workerPromptFile string
+	succeeded := false
+	defer func() {
+		if succeeded {
+			return
+		}
+		fmt.Println("\nWorker creation failed, rolling back...")
+		if tmuxWindowCreated && tmuxSession != "" {
+			fmt.Printf("  Removing tmux window: %s\n", workerName)
+			killCmd := exec.Command("tmux", "kill-window", "-t", fmt.Sprintf("%s:%s", tmuxSession, workerName))
+			if killErr := killCmd.Run(); killErr != nil {
+				fmt.Printf("  Warning: failed to kill tmux window: %v\n", killErr)
+			}
+		}
+		if workerPromptFile != "" {
+			fmt.Printf("  Removing prompt file: %s\n", workerPromptFile)
+			os.Remove(workerPromptFile)
+		}
+		fmt.Printf("  Removing worktree: %s\n", wtPath)
+		if removeErr := wt.Remove(wtPath, true); removeErr != nil {
+			fmt.Printf("  Warning: failed to remove worktree: %v\n", removeErr)
+		}
+	}()
+
 	// Get repository info to determine tmux session
 	client := socket.NewClient(c.paths.DaemonSock)
 	resp, err := client.Send(socket.Request{
@@ -1725,7 +1754,7 @@ func (c *CLI) createWorker(args []string) error {
 	}
 
 	// Get tmux session name (it's mc-<reponame>)
-	tmuxSession := sanitizeTmuxSessionName(repoName)
+	tmuxSession = sanitizeTmuxSessionName(repoName)
 
 	// Ensure tmux session exists before creating window
 	// This handles cases where the session was killed or daemon didn't restore it
@@ -1747,6 +1776,7 @@ func (c *CLI) createWorker(args []string) error {
 	if err := cmd.Run(); err != nil {
 		return errors.TmuxOperationFailed("create window", err)
 	}
+	tmuxWindowCreated = true
 
 	// Generate session ID for worker
 	workerSessionID, err := claude.GenerateSessionID()
@@ -1759,7 +1789,7 @@ func (c *CLI) createWorker(args []string) error {
 	if hasPushTo {
 		workerConfig.PushToBranch = pushTo
 	}
-	workerPromptFile, err := c.writeWorkerPromptFile(repoPath, workerName, workerConfig)
+	workerPromptFile, err = c.writeWorkerPromptFile(repoPath, workerName, workerConfig)
 	if err != nil {
 		return fmt.Errorf("failed to write worker prompt: %w", err)
 	}
@@ -1812,6 +1842,8 @@ func (c *CLI) createWorker(args []string) error {
 	if !resp.Success {
 		return fmt.Errorf("failed to register worker: %s", resp.Error)
 	}
+
+	succeeded = true
 
 	fmt.Println()
 	fmt.Println("✓ Worker created successfully!")
