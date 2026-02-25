@@ -1282,6 +1282,17 @@ func TestWakeLoopUpdatesNudgeTime(t *testing.T) {
 		t.Fatalf("Failed to add agent: %v", err)
 	}
 
+	// Add a worker so supervisor has work to do (selective wakeup requires it)
+	worker := state.Agent{
+		Type:       state.AgentTypeWorker,
+		TmuxWindow: "worker",
+		Task:       "test task",
+		CreatedAt:  time.Now(),
+	}
+	if err := d.state.AddAgent("test-repo", "worker-1", worker); err != nil {
+		t.Fatalf("Failed to add worker: %v", err)
+	}
+
 	// Trigger wake
 	beforeWake := time.Now()
 	d.TriggerWake()
@@ -2826,5 +2837,271 @@ func TestHandleClearCurrentRepoWhenNone(t *testing.T) {
 	resp := d.handleRequest(socket.Request{Command: "clear_current_repo"})
 	if !resp.Success {
 		t.Errorf("clear_current_repo should succeed even when no repo set: %s", resp.Error)
+	}
+}
+
+func TestAgentHasWorkSupervisorWithActiveWorkers(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	// Add supervisor and an active worker
+	supervisor := state.Agent{Type: state.AgentTypeSupervisor, TmuxWindow: "supervisor", CreatedAt: time.Now()}
+	worker := state.Agent{Type: state.AgentTypeWorker, TmuxWindow: "worker", Task: "do stuff", CreatedAt: time.Now()}
+	d.state.AddAgent("test-repo", "supervisor", supervisor)
+	d.state.AddAgent("test-repo", "worker-1", worker)
+
+	msgMgr := d.getMessageManager()
+
+	// Re-fetch repo snapshot to include the worker
+	repos := d.state.GetAllRepos()
+	repoSnap := repos["test-repo"]
+
+	reason := d.agentHasWork("test-repo", "supervisor", supervisor, repoSnap, msgMgr)
+	if reason == "" {
+		t.Error("Supervisor should have work when active workers exist")
+	}
+	if reason != "active workers" {
+		t.Errorf("Expected reason 'active workers', got %q", reason)
+	}
+}
+
+func TestAgentHasWorkSupervisorNoWorkers(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	supervisor := state.Agent{Type: state.AgentTypeSupervisor, TmuxWindow: "supervisor", CreatedAt: time.Now()}
+	d.state.AddAgent("test-repo", "supervisor", supervisor)
+
+	msgMgr := d.getMessageManager()
+	repos := d.state.GetAllRepos()
+	repoSnap := repos["test-repo"]
+
+	reason := d.agentHasWork("test-repo", "supervisor", supervisor, repoSnap, msgMgr)
+	if reason != "" {
+		t.Errorf("Supervisor should have no work when no workers exist, got reason %q", reason)
+	}
+}
+
+func TestAgentHasWorkMergeQueueWithOpenPRs(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	mq := state.Agent{Type: state.AgentTypeMergeQueue, TmuxWindow: "merge-queue", CreatedAt: time.Now()}
+	worker := state.Agent{Type: state.AgentTypeWorker, TmuxWindow: "worker", PRURL: "https://github.com/test/repo/pull/1", CreatedAt: time.Now()}
+	d.state.AddAgent("test-repo", "merge-queue", mq)
+	d.state.AddAgent("test-repo", "worker-1", worker)
+
+	msgMgr := d.getMessageManager()
+	repos := d.state.GetAllRepos()
+	repoSnap := repos["test-repo"]
+
+	reason := d.agentHasWork("test-repo", "merge-queue", mq, repoSnap, msgMgr)
+	if reason == "" {
+		t.Error("Merge queue should have work when workers have open PRs")
+	}
+}
+
+func TestAgentHasWorkMergeQueueNoPRs(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	mq := state.Agent{Type: state.AgentTypeMergeQueue, TmuxWindow: "merge-queue", CreatedAt: time.Now()}
+	d.state.AddAgent("test-repo", "merge-queue", mq)
+
+	msgMgr := d.getMessageManager()
+	repos := d.state.GetAllRepos()
+	repoSnap := repos["test-repo"]
+
+	reason := d.agentHasWork("test-repo", "merge-queue", mq, repoSnap, msgMgr)
+	if reason != "" {
+		t.Errorf("Merge queue should have no work without PRs, got reason %q", reason)
+	}
+}
+
+func TestAgentHasWorkWorkerNoMessages(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	worker := state.Agent{Type: state.AgentTypeWorker, TmuxWindow: "worker", Task: "do stuff", CreatedAt: time.Now()}
+	d.state.AddAgent("test-repo", "worker-1", worker)
+
+	msgMgr := d.getMessageManager()
+	repos := d.state.GetAllRepos()
+	repoSnap := repos["test-repo"]
+
+	reason := d.agentHasWork("test-repo", "worker-1", worker, repoSnap, msgMgr)
+	if reason != "" {
+		t.Errorf("Worker should have no work without messages, got reason %q", reason)
+	}
+}
+
+func TestAgentHasWorkWithPendingMessages(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	worker := state.Agent{Type: state.AgentTypeWorker, TmuxWindow: "worker", Task: "do stuff", CreatedAt: time.Now()}
+	d.state.AddAgent("test-repo", "worker-1", worker)
+
+	// Send a message to the worker
+	msgMgr := d.getMessageManager()
+	_, err := msgMgr.Send("test-repo", "supervisor", "worker-1", "You have a task")
+	if err != nil {
+		t.Fatalf("Failed to send message: %v", err)
+	}
+
+	repos := d.state.GetAllRepos()
+	repoSnap := repos["test-repo"]
+
+	reason := d.agentHasWork("test-repo", "worker-1", worker, repoSnap, msgMgr)
+	if reason != "pending messages" {
+		t.Errorf("Worker with pending messages should have work, got reason %q", reason)
+	}
+}
+
+func TestAgentHasWorkMergeQueueWithHistoryPRs(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	mq := state.Agent{Type: state.AgentTypeMergeQueue, TmuxWindow: "merge-queue", CreatedAt: time.Now()}
+	d.state.AddAgent("test-repo", "merge-queue", mq)
+
+	// Add a task history entry with an open PR
+	entry := state.TaskHistoryEntry{
+		Name:        "old-worker",
+		Task:        "some task",
+		Branch:      "work/old-worker",
+		PRURL:       "https://github.com/test/repo/pull/5",
+		PRNumber:    5,
+		Status:      state.TaskStatusOpen,
+		CreatedAt:   time.Now(),
+		CompletedAt: time.Now(),
+	}
+	d.state.AddTaskHistory("test-repo", entry)
+
+	msgMgr := d.getMessageManager()
+	repos := d.state.GetAllRepos()
+	repoSnap := repos["test-repo"]
+
+	reason := d.agentHasWork("test-repo", "merge-queue", mq, repoSnap, msgMgr)
+	if reason == "" {
+		t.Error("Merge queue should have work when task history has open PRs")
+	}
+	if reason != "open PRs in history" {
+		t.Errorf("Expected reason 'open PRs in history', got %q", reason)
+	}
+}
+
+func TestSelectiveWakeSkipsWorkersWithoutWork(t *testing.T) {
+	tmuxClient := tmux.NewClient()
+	if !tmuxClient.IsTmuxAvailable() {
+		t.Skip("tmux not available")
+	}
+
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	// Create a real tmux session
+	sessionName := "mc-test-selective-wake"
+	if err := tmuxClient.CreateSession(context.Background(), sessionName, true); err != nil {
+		t.Fatalf("Failed to create tmux session: %v", err)
+	}
+	defer tmuxClient.KillSession(context.Background(), sessionName)
+
+	// Create windows for agents
+	if err := tmuxClient.CreateWindow(context.Background(), sessionName, "worker"); err != nil {
+		t.Fatalf("Failed to create worker window: %v", err)
+	}
+
+	// Add repo and a worker with no messages (should NOT be woken)
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: sessionName,
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	worker := state.Agent{
+		Type:       state.AgentTypeWorker,
+		TmuxWindow: "worker",
+		Task:       "Test task",
+		CreatedAt:  time.Now(),
+		LastNudge:  time.Time{}, // Never nudged
+	}
+	if err := d.state.AddAgent("test-repo", "worker-1", worker); err != nil {
+		t.Fatalf("Failed to add agent: %v", err)
+	}
+
+	// Trigger wake - worker has no messages, should NOT be woken
+	d.TriggerWake()
+
+	// Verify LastNudge was NOT updated (worker skipped due to no work)
+	updatedAgent, _ := d.state.GetAgent("test-repo", "worker-1")
+	if !updatedAgent.LastNudge.IsZero() {
+		t.Error("Worker without work should NOT be woken - LastNudge should remain zero")
 	}
 }
