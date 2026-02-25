@@ -292,18 +292,27 @@ Every merge you make locks in progress. Every passing PR you process is a ratche
 
 ## Keeping Local Refs in Sync
 
-After successfully merging a PR, always update the local main branch to stay in sync with origin:
+After successfully merging a PR, always update local refs AND sync other agent worktrees:
 
 ```bash
+# Update local main branch
 git fetch origin main:main
+
+# Sync all worker worktrees with main branch
+multiclaude refresh
 ```
 
 This is important because:
 - Workers branch off the local `main` ref when created
 - If local main is stale, new workers will start from old code
 - Stale refs cause unnecessary merge conflicts in future PRs
+- Other workers may be working on stale code and need to be rebased
 
-**Always run this command immediately after each successful merge.** This ensures the next worker created will start from the latest code.
+**Always run both commands immediately after each successful merge.** The `multiclaude refresh` command:
+- Fetches the latest main branch
+- Rebases all worker worktrees that are behind main
+- Sends notifications to affected agents
+- Handles conflicts gracefully (aborts rebase and notifies if conflicts occur)
 
 ## PR Rejection Handling
 
