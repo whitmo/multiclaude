@@ -1285,3 +1285,159 @@ func TestTaskHistoryPersistence(t *testing.T) {
 		t.Errorf("Loaded entry status = %q, want 'merged'", history[0].Status)
 	}
 }
+
+func TestAgentCrashedState(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Add a worker agent
+	agent := Agent{
+		Type:         AgentTypeWorker,
+		WorktreePath: "/path/to/worktree",
+		TmuxWindow:   "worker-1",
+		Task:         "test task",
+		PID:          12345,
+		CreatedAt:    time.Now(),
+	}
+	if err := s.AddAgent("test-repo", "worker-1", agent); err != nil {
+		t.Fatalf("AddAgent() failed: %v", err)
+	}
+
+	// Verify CrashedAt is initially zero
+	retrieved, exists := s.GetAgent("test-repo", "worker-1")
+	if !exists {
+		t.Fatal("Agent not found after adding")
+	}
+	if !retrieved.CrashedAt.IsZero() {
+		t.Error("CrashedAt should be zero initially")
+	}
+
+	// Mark agent as crashed
+	crashTime := time.Now()
+	if err := s.UpdateAgentCrashed("test-repo", "worker-1", crashTime); err != nil {
+		t.Fatalf("UpdateAgentCrashed() failed: %v", err)
+	}
+
+	// Verify crash time was set
+	retrieved, _ = s.GetAgent("test-repo", "worker-1")
+	if retrieved.CrashedAt.IsZero() {
+		t.Error("CrashedAt should be set after UpdateAgentCrashed")
+	}
+	if !retrieved.CrashedAt.Equal(crashTime) {
+		t.Errorf("CrashedAt = %v, want %v", retrieved.CrashedAt, crashTime)
+	}
+
+	// Clear crashed state (simulating restart)
+	if err := s.ClearAgentCrashed("test-repo", "worker-1"); err != nil {
+		t.Fatalf("ClearAgentCrashed() failed: %v", err)
+	}
+
+	// Verify crash time was cleared
+	retrieved, _ = s.GetAgent("test-repo", "worker-1")
+	if !retrieved.CrashedAt.IsZero() {
+		t.Error("CrashedAt should be zero after ClearAgentCrashed")
+	}
+}
+
+func TestAgentCrashedStatePersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	// Create state and add crashed worker
+	s := New(statePath)
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	agent := Agent{
+		Type:         AgentTypeWorker,
+		WorktreePath: "/path/to/worktree",
+		TmuxWindow:   "worker-1",
+		Task:         "test task",
+		PID:          12345,
+		CreatedAt:    time.Now(),
+	}
+	if err := s.AddAgent("test-repo", "worker-1", agent); err != nil {
+		t.Fatalf("AddAgent() failed: %v", err)
+	}
+
+	crashTime := time.Now()
+	if err := s.UpdateAgentCrashed("test-repo", "worker-1", crashTime); err != nil {
+		t.Fatalf("UpdateAgentCrashed() failed: %v", err)
+	}
+
+	// Load state from disk
+	loaded, err := Load(statePath)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	// Verify crash time persisted
+	retrieved, exists := loaded.GetAgent("test-repo", "worker-1")
+	if !exists {
+		t.Fatal("Agent not found after loading")
+	}
+	if retrieved.CrashedAt.IsZero() {
+		t.Error("CrashedAt should be persisted")
+	}
+	// Check time is approximately equal (JSON serialization may lose precision)
+	if retrieved.CrashedAt.Unix() != crashTime.Unix() {
+		t.Errorf("Loaded CrashedAt = %v, want %v", retrieved.CrashedAt, crashTime)
+	}
+}
+
+func TestAgentCrashedStateErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Test UpdateAgentCrashed with non-existent repo
+	err := s.UpdateAgentCrashed("nonexistent", "agent", time.Now())
+	if err == nil {
+		t.Error("UpdateAgentCrashed should fail for non-existent repo")
+	}
+
+	// Test ClearAgentCrashed with non-existent repo
+	err = s.ClearAgentCrashed("nonexistent", "agent")
+	if err == nil {
+		t.Error("ClearAgentCrashed should fail for non-existent repo")
+	}
+
+	// Add repo but no agent
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Test UpdateAgentCrashed with non-existent agent
+	err = s.UpdateAgentCrashed("test-repo", "nonexistent", time.Now())
+	if err == nil {
+		t.Error("UpdateAgentCrashed should fail for non-existent agent")
+	}
+
+	// Test ClearAgentCrashed with non-existent agent
+	err = s.ClearAgentCrashed("test-repo", "nonexistent")
+	if err == nil {
+		t.Error("ClearAgentCrashed should fail for non-existent agent")
+	}
+}

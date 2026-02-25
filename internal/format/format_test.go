@@ -18,6 +18,7 @@ func TestStatusColor(t *testing.T) {
 		{StatusIdle, false},
 		{StatusPending, false},
 		{StatusError, false},
+		{StatusCrashed, false},
 		{Status("unknown"), false},
 	}
 
@@ -45,6 +46,7 @@ func TestStatusIcon(t *testing.T) {
 		{StatusIdle, "○"},
 		{StatusWarning, "⚠"},
 		{StatusError, "✗"},
+		{StatusCrashed, "!"},
 		{StatusPending, "◦"},
 		{Status("unknown"), "-"},
 	}

@@ -94,6 +94,7 @@ type Agent struct {
 	CreatedAt       time.Time `json:"created_at"`
 	LastNudge       time.Time `json:"last_nudge,omitempty"`
 	ReadyForCleanup bool      `json:"ready_for_cleanup,omitempty"` // Only for workers
+	CrashedAt       time.Time `json:"crashed_at,omitempty"`        // When crash was detected (workers only)
 }
 
 // Repository represents a tracked repository's state
@@ -340,6 +341,46 @@ func (s *State) UpdateAgentPID(repoName, agentName string, pid int) error {
 	}
 
 	agent.PID = pid
+	repo.Agents[agentName] = agent
+	return s.saveUnlocked()
+}
+
+// UpdateAgentCrashed marks an agent as crashed at the given time
+func (s *State) UpdateAgentCrashed(repoName, agentName string, crashedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	agent, exists := repo.Agents[agentName]
+	if !exists {
+		return fmt.Errorf("agent %q not found in repository %q", agentName, repoName)
+	}
+
+	agent.CrashedAt = crashedAt
+	repo.Agents[agentName] = agent
+	return s.saveUnlocked()
+}
+
+// ClearAgentCrashed clears the crashed state for an agent (e.g., after restart)
+func (s *State) ClearAgentCrashed(repoName, agentName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	agent, exists := repo.Agents[agentName]
+	if !exists {
+		return fmt.Errorf("agent %q not found in repository %q", agentName, repoName)
+	}
+
+	agent.CrashedAt = time.Time{}
 	repo.Agents[agentName] = agent
 	return s.saveUnlocked()
 }
