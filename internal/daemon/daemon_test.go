@@ -1258,6 +1258,137 @@ func TestMessageRoutingCleansUpAckedMessages(t *testing.T) {
 	}
 }
 
+// PR #342: Test message cleanup with no acked messages (edge case)
+func TestMessageRoutingNoAckedMessages(t *testing.T) {
+	tmuxClient := tmux.NewClient()
+	if !tmuxClient.IsTmuxAvailable() {
+		t.Fatal("tmux is required for this test but not available")
+	}
+
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	sessionName := "mc-test-noack"
+	if err := tmuxClient.CreateSession(context.Background(), sessionName, true); err != nil {
+		t.Fatalf("tmux is required for this test but cannot create sessions in this environment: %v", err)
+	}
+	defer tmuxClient.KillSession(context.Background(), sessionName)
+
+	if err := tmuxClient.CreateWindow(context.Background(), sessionName, "worker1"); err != nil {
+		t.Fatalf("Failed to create worker window: %v", err)
+	}
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: sessionName,
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	worker := state.Agent{
+		Type:       state.AgentTypeWorker,
+		TmuxWindow: "worker1",
+		Task:       "Test task",
+		CreatedAt:  time.Now(),
+	}
+	if err := d.state.AddAgent("test-repo", "worker1", worker); err != nil {
+		t.Fatalf("Failed to add worker: %v", err)
+	}
+
+	// Send messages but DON'T ack them
+	msgMgr := messages.NewManager(d.paths.MessagesDir)
+	for i := 0; i < 3; i++ {
+		_, err := msgMgr.Send("test-repo", "supervisor", "worker1", "Test message")
+		if err != nil {
+			t.Fatalf("Failed to send message: %v", err)
+		}
+	}
+
+	// Trigger message routing - should not delete unacked messages
+	d.TriggerMessageRouting()
+
+	// Verify all 3 messages still exist (none were acked)
+	msgs, err := msgMgr.List("test-repo", "worker1")
+	if err != nil {
+		t.Fatalf("Failed to list messages: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Errorf("Expected 3 unacked messages to remain, got %d", len(msgs))
+	}
+}
+
+// PR #342: Test mixed acked and unacked messages
+func TestMessageRoutingMixedAckStatus(t *testing.T) {
+	tmuxClient := tmux.NewClient()
+	if !tmuxClient.IsTmuxAvailable() {
+		t.Fatal("tmux is required for this test but not available")
+	}
+
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	sessionName := "mc-test-mixed"
+	if err := tmuxClient.CreateSession(context.Background(), sessionName, true); err != nil {
+		t.Fatalf("tmux is required for this test but cannot create sessions in this environment: %v", err)
+	}
+	defer tmuxClient.KillSession(context.Background(), sessionName)
+
+	if err := tmuxClient.CreateWindow(context.Background(), sessionName, "worker1"); err != nil {
+		t.Fatalf("Failed to create worker window: %v", err)
+	}
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: sessionName,
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	worker := state.Agent{
+		Type:       state.AgentTypeWorker,
+		TmuxWindow: "worker1",
+		Task:       "Test task",
+		CreatedAt:  time.Now(),
+	}
+	if err := d.state.AddAgent("test-repo", "worker1", worker); err != nil {
+		t.Fatalf("Failed to add worker: %v", err)
+	}
+
+	// Send 4 messages, ack 2
+	msgMgr := messages.NewManager(d.paths.MessagesDir)
+	var msgIDs []string
+	for i := 0; i < 4; i++ {
+		msg, err := msgMgr.Send("test-repo", "supervisor", "worker1", "Test message")
+		if err != nil {
+			t.Fatalf("Failed to send message: %v", err)
+		}
+		msgIDs = append(msgIDs, msg.ID)
+	}
+
+	// Ack first 2 messages
+	for _, id := range msgIDs[:2] {
+		if err := msgMgr.Ack("test-repo", "worker1", id); err != nil {
+			t.Fatalf("Failed to ack message: %v", err)
+		}
+	}
+
+	// Trigger routing
+	d.TriggerMessageRouting()
+
+	// Verify only unacked messages remain
+	msgs, err := msgMgr.List("test-repo", "worker1")
+	if err != nil {
+		t.Fatalf("Failed to list messages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Errorf("Expected 2 unacked messages to remain, got %d", len(msgs))
+	}
+}
+
 func TestWakeLoopUpdatesNudgeTime(t *testing.T) {
 	tmuxClient := tmux.NewClient()
 	if !tmuxClient.IsTmuxAvailable() {
