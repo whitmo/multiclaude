@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dlorenc/multiclaude/internal/daemon"
+	"github.com/dlorenc/multiclaude/internal/errors"
 	"github.com/dlorenc/multiclaude/internal/messages"
 	"github.com/dlorenc/multiclaude/internal/socket"
 	"github.com/dlorenc/multiclaude/internal/state"
@@ -1893,6 +1894,53 @@ func TestValidateWorkspaceName(t *testing.T) {
 	}
 }
 
+// PR #340: Verify validateWorkspaceName returns structured CLIErrors
+func TestValidateWorkspaceNameStructuredErrors(t *testing.T) {
+	tests := []struct {
+		name         string
+		workspace    string
+		wantContains string
+	}{
+		{"empty", "", "cannot be empty"},
+		{"dot", ".", "cannot be '.' or '..'"},
+		{"dotdot", "..", "cannot be '.' or '..'"},
+		{"starts with dot", ".hidden", "cannot start with '.' or '-'"},
+		{"starts with dash", "-bad", "cannot start with '.' or '-'"},
+		{"ends with dot", "bad.", "cannot end with '.' or '/'"},
+		{"ends with slash", "bad/", "cannot end with '.' or '/'"},
+		{"contains dotdot", "bad..name", "cannot contain '..'"},
+		{"contains space", "bad name", "cannot contain ' '"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateWorkspaceName(tt.workspace)
+			if err == nil {
+				t.Fatalf("expected error for workspace name %q", tt.workspace)
+			}
+
+			// Verify it's a CLIError (structured error from PR #340)
+			cliErr, ok := err.(*errors.CLIError)
+			if !ok {
+				t.Fatalf("expected *errors.CLIError, got %T: %v", err, err)
+			}
+
+			if cliErr.Category != errors.CategoryUsage {
+				t.Errorf("expected CategoryUsage, got %v", cliErr.Category)
+			}
+
+			if !strings.Contains(cliErr.Message, tt.wantContains) {
+				t.Errorf("expected message to contain %q, got: %s", tt.wantContains, cliErr.Message)
+			}
+
+			// All invalid workspace name errors should suggest naming conventions
+			if cliErr.Suggestion == "" {
+				t.Error("expected a suggestion for naming conventions")
+			}
+		})
+	}
+}
+
 func TestCLIWorkspaceListEmpty(t *testing.T) {
 	cli, d, cleanup := setupTestEnvironment(t)
 	defer cleanup()
@@ -3136,6 +3184,100 @@ func TestCommandSchemaConversion(t *testing.T) {
 	}
 	if _, exists := schema.Subcommands["_internal"]; exists {
 		t.Error("internal commands should be filtered from schema")
+	}
+}
+
+// PR #335: Additional JSON output edge cases
+
+func TestCommandSchemaEmptySubcommands(t *testing.T) {
+	cmd := &Command{
+		Name:        "leaf",
+		Description: "leaf command with no subcommands",
+	}
+
+	schema := cmd.toSchema()
+
+	if schema.Name != "leaf" {
+		t.Errorf("expected name 'leaf', got '%s'", schema.Name)
+	}
+	if schema.Subcommands != nil {
+		t.Errorf("expected nil subcommands for leaf command, got %v", schema.Subcommands)
+	}
+}
+
+func TestCommandSchemaNestedSubcommands(t *testing.T) {
+	cmd := &Command{
+		Name:        "root",
+		Description: "root command",
+		Subcommands: map[string]*Command{
+			"level1": {
+				Name:        "level1",
+				Description: "level 1",
+				Subcommands: map[string]*Command{
+					"level2": {
+						Name:        "level2",
+						Description: "level 2",
+						Usage:       "root level1 level2",
+					},
+				},
+			},
+		},
+	}
+
+	schema := cmd.toSchema()
+
+	l1, exists := schema.Subcommands["level1"]
+	if !exists {
+		t.Fatal("expected level1 subcommand")
+	}
+	l2, exists := l1.Subcommands["level2"]
+	if !exists {
+		t.Fatal("expected level2 nested subcommand")
+	}
+	if l2.Usage != "root level1 level2" {
+		t.Errorf("expected nested usage, got: %s", l2.Usage)
+	}
+}
+
+func TestCommandSchemaAllInternalFiltered(t *testing.T) {
+	cmd := &Command{
+		Name:        "test",
+		Description: "test",
+		Subcommands: map[string]*Command{
+			"_a": {Name: "_a", Description: "internal a"},
+			"_b": {Name: "_b", Description: "internal b"},
+		},
+	}
+
+	schema := cmd.toSchema()
+
+	// When all subcommands are internal, map should be empty but not nil
+	if len(schema.Subcommands) != 0 {
+		t.Errorf("expected 0 subcommands (all internal filtered), got %d", len(schema.Subcommands))
+	}
+}
+
+func TestHelpJSONSubcommandOutput(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Test various subcommand --json combinations
+	subcommands := [][]string{
+		{"repo", "--json"},
+		{"worker", "--json"},
+		{"workspace", "--json"},
+		{"daemon", "--json"},
+		{"message", "--json"},
+		{"agent", "--help", "--json"},
+	}
+
+	for _, args := range subcommands {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			err := cli.Execute(args)
+			if err != nil {
+				t.Errorf("Execute(%v) failed: %v", args, err)
+			}
+		})
 	}
 }
 
