@@ -13,6 +13,7 @@ list_agents
 complete_agent
 restart_agent
 trigger_cleanup
+trigger_refresh
 repair_state
 get_repo_config
 update_repo_config
@@ -49,6 +50,7 @@ Each command below matches a `case` in `handleRequest`.
 | `complete_agent` | Mark agent ready for cleanup | `repo`, `name`, `summary`, `failure_reason` |
 | `restart_agent` | Restart a persistent agent | `repo`, `name` |
 | `trigger_cleanup` | Force cleanup cycle | none |
+| `trigger_refresh` | Force worktree refresh cycle | none |
 | `repair_state` | Run state repair routine | none |
 | `get_repo_config` | Get merge-queue / pr-shepherd config | `repo` |
 | `update_repo_config` | Update repo config | `repo`, `config` (JSON object) |
@@ -643,6 +645,27 @@ class MulticlaudeClient {
   "data": "Cleanup triggered"
 }
 ```
+
+#### trigger_refresh
+
+**Description:** Trigger immediate worktree refresh for all agents (syncs with main branch)
+
+**Request:**
+```json
+{
+  "command": "trigger_refresh"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": "Worktree refresh triggered"
+}
+```
+
+**Note:** Refresh runs asynchronously in the background.
 
 #### repair_state
 

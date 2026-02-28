@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/dlorenc/multiclaude/internal/agents"
 	"github.com/dlorenc/multiclaude/internal/bugreport"
 	"github.com/dlorenc/multiclaude/internal/daemon"
@@ -5538,14 +5540,25 @@ func (c *CLI) restartClaude(args []string) error {
 
 	// Build the command
 	var cmdArgs []string
+	sessionID := agent.SessionID
 	if hasHistory {
 		// Session has history - use --resume to continue
-		cmdArgs = []string{"--resume", agent.SessionID}
-		fmt.Printf("Resuming Claude session %s...\n", agent.SessionID)
+		cmdArgs = []string{"--resume", sessionID}
+		fmt.Printf("Resuming Claude session %s...\n", sessionID)
 	} else {
-		// New session - use --session-id
-		cmdArgs = []string{"--session-id", agent.SessionID}
-		fmt.Printf("Starting new Claude session %s...\n", agent.SessionID)
+		// No history - generate a new session ID to avoid "already in use" errors
+		// This can happen when Claude exits abnormally or the previous session
+		// was started but never used
+		sessionID = uuid.New().String()
+		cmdArgs = []string{"--session-id", sessionID}
+		fmt.Printf("Starting new Claude session %s...\n", sessionID)
+
+		// Update agent with new session ID
+		agent.SessionID = sessionID
+		if err := st.UpdateAgent(repoName, agentName, agent); err != nil {
+			fmt.Printf("Warning: failed to save new session ID: %v\n", err)
+			// Continue anyway - the session will work, just won't persist
+		}
 	}
 
 	// Add common flags
