@@ -419,6 +419,14 @@ func (d *Daemon) routeMessages() {
 
 				d.logger.Info("Delivered message %s from %s to %s/%s", msg.ID, msg.From, repoName, agentName)
 			}
+
+			// Clean up acknowledged messages to prevent pile-up
+			count, err := msgMgr.DeleteAcked(repoName, agentName)
+			if err != nil {
+				d.logger.Error("Failed to clean up acked messages for %s/%s: %v", repoName, agentName, err)
+			} else if count > 0 {
+				d.logger.Debug("Cleaned up %d acked messages for %s/%s", count, repoName, agentName)
+			}
 		}
 	}
 }
