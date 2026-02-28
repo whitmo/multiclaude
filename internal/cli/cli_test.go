@@ -2811,6 +2811,69 @@ func TestVersionCommandJSON(t *testing.T) {
 	}
 }
 
+func TestHelpJSON(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Test --json flag at root level
+	err := cli.Execute([]string{"--json"})
+	if err != nil {
+		t.Errorf("Execute(--json) failed: %v", err)
+	}
+
+	// Test --help --json combination
+	err = cli.Execute([]string{"--help", "--json"})
+	if err != nil {
+		t.Errorf("Execute(--help --json) failed: %v", err)
+	}
+
+	// Test subcommand --json
+	err = cli.Execute([]string{"agent", "--json"})
+	if err != nil {
+		t.Errorf("Execute(agent --json) failed: %v", err)
+	}
+}
+
+func TestCommandSchemaConversion(t *testing.T) {
+	cmd := &Command{
+		Name:        "test",
+		Description: "test command",
+		Usage:       "multiclaude test [args]",
+		Subcommands: map[string]*Command{
+			"sub": {
+				Name:        "sub",
+				Description: "subcommand",
+				Usage:       "multiclaude test sub",
+			},
+			"_internal": {
+				Name:        "_internal",
+				Description: "internal command",
+			},
+		},
+	}
+
+	schema := cmd.toSchema()
+
+	if schema.Name != "test" {
+		t.Errorf("expected name 'test', got '%s'", schema.Name)
+	}
+	if schema.Description != "test command" {
+		t.Errorf("expected description 'test command', got '%s'", schema.Description)
+	}
+	if schema.Usage != "multiclaude test [args]" {
+		t.Errorf("expected usage 'multiclaude test [args]', got '%s'", schema.Usage)
+	}
+	if len(schema.Subcommands) != 1 {
+		t.Errorf("expected 1 subcommand (internal should be filtered), got %d", len(schema.Subcommands))
+	}
+	if _, exists := schema.Subcommands["sub"]; !exists {
+		t.Error("expected 'sub' subcommand to exist")
+	}
+	if _, exists := schema.Subcommands["_internal"]; exists {
+		t.Error("internal commands should be filtered from schema")
+	}
+}
+
 func TestShowHelpNoPanic(t *testing.T) {
 	cli, _, cleanup := setupTestEnvironment(t)
 	defer cleanup()
@@ -2822,7 +2885,7 @@ func TestShowHelpNoPanic(t *testing.T) {
 		}
 	}()
 
-	cli.showHelp()
+	cli.showHelp(false)
 }
 
 func TestExecuteEmptyArgs(t *testing.T) {
