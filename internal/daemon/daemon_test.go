@@ -3830,3 +3830,274 @@ func TestRecordTaskHistoryWithSummary(t *testing.T) {
 		t.Errorf("History entry summary = %q, want 'Implemented the feature successfully'", history[0].Summary)
 	}
 }
+
+// TestEnsureCoreAgentsEmptyState tests ensureCoreAgents when the repo
+// doesn't exist in state, verifying it returns an error.
+func TestEnsureCoreAgentsEmptyState(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	// Call with a repo that doesn't exist in state
+	created, err := d.ensureCoreAgents("nonexistent-repo")
+	if err == nil {
+		t.Fatal("Expected error for nonexistent repo, got nil")
+	}
+	if created != 0 {
+		t.Errorf("Expected 0 agents created, got %d", created)
+	}
+	if !strings.Contains(err.Error(), "nonexistent-repo") {
+		t.Errorf("Error should mention repo name, got: %s", err.Error())
+	}
+}
+
+// TestEnsureCoreAgentsNoTmuxSession tests ensureCoreAgents when the repo
+// exists but the tmux session doesn't — should skip gracefully.
+func TestEnsureCoreAgentsNoTmuxSession(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	// Add a repo with a tmux session name that doesn't exist
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-nonexistent-session",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	created, err := d.ensureCoreAgents("test-repo")
+	if err != nil {
+		t.Errorf("Expected no error when session missing, got: %v", err)
+	}
+	if created != 0 {
+		t.Errorf("Expected 0 agents created (no tmux session), got %d", created)
+	}
+}
+
+// TestEnsureCoreAgentsSkipsExistingAgents tests that ensureCoreAgents does
+// NOT attempt to recreate agents that already exist in state.
+func TestEnsureCoreAgentsSkipsExistingAgents(t *testing.T) {
+	tmuxClient := tmux.NewClient()
+	if !tmuxClient.IsTmuxAvailable() {
+		t.Skip("tmux is required for this test but not available")
+	}
+
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	sessionName := "mc-test-ensure-core"
+	if err := tmuxClient.CreateSession(context.Background(), sessionName, true); err != nil {
+		t.Skipf("Cannot create tmux session in this environment: %v", err)
+	}
+	defer tmuxClient.KillSession(context.Background(), sessionName)
+
+	// Add repo with existing supervisor agent
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: sessionName,
+		Agents: map[string]state.Agent{
+			"supervisor": {
+				Type:       state.AgentTypeSupervisor,
+				TmuxWindow: "supervisor",
+				PID:        99999,
+				CreatedAt:  time.Now(),
+			},
+			"merge-queue": {
+				Type:       state.AgentTypeMergeQueue,
+				TmuxWindow: "merge-queue",
+				PID:        99998,
+				CreatedAt:  time.Now(),
+			},
+		},
+		MergeQueueConfig: state.DefaultMergeQueueConfig(),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	created, err := d.ensureCoreAgents("test-repo")
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+	if created != 0 {
+		t.Errorf("Expected 0 agents created (all exist), got %d", created)
+	}
+
+	// Verify agents are still there unchanged
+	agent, exists := d.state.GetAgent("test-repo", "supervisor")
+	if !exists {
+		t.Error("Supervisor agent should still exist")
+	}
+	if agent.PID != 99999 {
+		t.Errorf("Supervisor PID should be unchanged (99999), got %d", agent.PID)
+	}
+
+	agent, exists = d.state.GetAgent("test-repo", "merge-queue")
+	if !exists {
+		t.Error("Merge-queue agent should still exist")
+	}
+	if agent.PID != 99998 {
+		t.Errorf("Merge-queue PID should be unchanged (99998), got %d", agent.PID)
+	}
+}
+
+// TestEnsureCoreAgentsSkipsForkModeWithPRShepherdExisting tests that in
+// fork mode, ensureCoreAgents skips creating pr-shepherd when it already exists.
+func TestEnsureCoreAgentsSkipsForkModeWithPRShepherdExisting(t *testing.T) {
+	tmuxClient := tmux.NewClient()
+	if !tmuxClient.IsTmuxAvailable() {
+		t.Skip("tmux is required for this test but not available")
+	}
+
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	sessionName := "mc-test-fork-skip"
+	if err := tmuxClient.CreateSession(context.Background(), sessionName, true); err != nil {
+		t.Skipf("Cannot create tmux session in this environment: %v", err)
+	}
+	defer tmuxClient.KillSession(context.Background(), sessionName)
+
+	// Fork mode repo with supervisor + pr-shepherd already present
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: sessionName,
+		Agents: map[string]state.Agent{
+			"supervisor": {
+				Type:       state.AgentTypeSupervisor,
+				TmuxWindow: "supervisor",
+				PID:        99999,
+				CreatedAt:  time.Now(),
+			},
+			"pr-shepherd": {
+				Type:       state.AgentTypePRShepherd,
+				TmuxWindow: "pr-shepherd",
+				PID:        99997,
+				CreatedAt:  time.Now(),
+			},
+		},
+		ForkConfig:       state.ForkConfig{IsFork: true},
+		PRShepherdConfig: state.DefaultPRShepherdConfig(),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	created, err := d.ensureCoreAgents("test-repo")
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+	if created != 0 {
+		t.Errorf("Expected 0 agents created (pr-shepherd exists), got %d", created)
+	}
+}
+
+// TestEnsureDefaultWorkspaceEmptyState tests ensureDefaultWorkspace when
+// the repo doesn't exist in state.
+func TestEnsureDefaultWorkspaceEmptyState(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	created, err := d.ensureDefaultWorkspace("nonexistent-repo")
+	if err == nil {
+		t.Fatal("Expected error for nonexistent repo, got nil")
+	}
+	if created {
+		t.Error("Expected false when repo doesn't exist")
+	}
+	if !strings.Contains(err.Error(), "nonexistent-repo") {
+		t.Errorf("Error should mention repo name, got: %s", err.Error())
+	}
+}
+
+// TestEnsureDefaultWorkspaceSkipsExisting tests that ensureDefaultWorkspace
+// returns (false, nil) when a workspace agent already exists.
+func TestEnsureDefaultWorkspaceSkipsExisting(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test-ws",
+		Agents: map[string]state.Agent{
+			"my-workspace": {
+				Type:       state.AgentTypeWorkspace,
+				TmuxWindow: "my-workspace",
+				PID:        88888,
+				CreatedAt:  time.Now(),
+			},
+		},
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	created, err := d.ensureDefaultWorkspace("test-repo")
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+	if created {
+		t.Error("Expected false when workspace already exists")
+	}
+}
+
+// TestEnsureDefaultWorkspaceNoTmuxSession tests that ensureDefaultWorkspace
+// skips creation gracefully when no tmux session exists.
+func TestEnsureDefaultWorkspaceNoTmuxSession(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-nonexistent-session",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	created, err := d.ensureDefaultWorkspace("test-repo")
+	if err != nil {
+		t.Errorf("Expected no error when session missing, got: %v", err)
+	}
+	if created {
+		t.Error("Expected false when tmux session doesn't exist")
+	}
+}
+
+// TestSpawnCoreAgentErrorIncludesDetails tests that spawnCoreAgent wraps
+// the handleRestartAgent error message (resp.Error) in the returned error.
+func TestSpawnCoreAgentErrorIncludesDetails(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	// Add repo but don't add the agent — handleRestartAgent will fail
+	// because the agent doesn't exist in state.
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test-spawn",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	err := d.spawnCoreAgent("test-repo", "supervisor", state.AgentTypeSupervisor)
+	if err == nil {
+		t.Fatal("Expected error from spawnCoreAgent, got nil")
+	}
+
+	// The error should wrap the resp.Error from handleRestartAgent.
+	// handleRestartAgent returns "agent 'supervisor' not found..." when agent not in state.
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "failed to spawn agent") {
+		t.Errorf("Error should contain 'failed to spawn agent', got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "supervisor") {
+		t.Errorf("Error should reference agent name 'supervisor', got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "not found") {
+		t.Errorf("Error should contain 'not found' from handleRestartAgent resp.Error, got: %s", errMsg)
+	}
+}
