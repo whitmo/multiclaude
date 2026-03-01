@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -78,6 +79,8 @@ type Command struct {
 	Usage       string
 	Run         func(args []string) error
 	Subcommands map[string]*Command
+	Hidden      bool   // Don't show in --help (for aliases)
+	Category    string // For grouping in help output
 }
 
 // CLI manages the command-line interface
@@ -273,21 +276,77 @@ func (c *CLI) executeCommand(cmd *Command, args []string) error {
 func (c *CLI) showHelp() error {
 	fmt.Println("multiclaude - repo-centric orchestrator for Claude Code")
 	fmt.Println()
-	fmt.Println("Usage: multiclaude <command> [options]")
+	fmt.Println("QUICK START:")
+	fmt.Println("  repo init <url>     Track a GitHub repository")
+	fmt.Println("  start               Start the daemon")
+	fmt.Println("  worker \"task\"       Create a worker for a task")
+	fmt.Println("  status              See what's running")
 	fmt.Println()
-	fmt.Println("Commands:")
 
-	for name, cmd := range c.rootCmd.Subcommands {
-		fmt.Printf("  %-15s %s\n", name, cmd.Description)
+	// Define category order and labels
+	categories := []struct {
+		key   string
+		label string
+	}{
+		{"daemon", "DAEMON:"},
+		{"repo", "REPOSITORIES:"},
+		{"agent", "AGENTS:"},
+		{"comm", "COMMUNICATION:"},
+		{"maint", "MAINTENANCE:"},
+		{"meta", "META:"},
 	}
 
-	fmt.Println()
-	fmt.Println("Use 'multiclaude <command> --help' for more information about a command.")
+	// Group commands by category
+	byCategory := make(map[string][]*struct {
+		name string
+		cmd  *Command
+	})
+
+	for name, cmd := range c.rootCmd.Subcommands {
+		if cmd.Hidden || strings.HasPrefix(name, "_") {
+			continue
+		}
+		cat := cmd.Category
+		if cat == "" {
+			cat = "meta" // Default category
+		}
+		byCategory[cat] = append(byCategory[cat], &struct {
+			name string
+			cmd  *Command
+		}{name, cmd})
+	}
+
+	// Sort commands within each category
+	for _, cmds := range byCategory {
+		sort.Slice(cmds, func(i, j int) bool {
+			return cmds[i].name < cmds[j].name
+		})
+	}
+
+	// Print by category
+	for _, cat := range categories {
+		cmds := byCategory[cat.key]
+		if len(cmds) == 0 {
+			continue
+		}
+		fmt.Println(cat.label)
+		for _, item := range cmds {
+			fmt.Printf("  %-15s %s\n", item.name, item.cmd.Description)
+		}
+		fmt.Println()
+	}
+
+	fmt.Println("Run 'multiclaude <command> --help' for details.")
 	return nil
 }
 
 // showCommandHelp shows help for a specific command
 func (c *CLI) showCommandHelp(cmd *Command) error {
+	// If this is the root command, use the categorized help
+	if cmd == c.rootCmd {
+		return c.showHelp()
+	}
+
 	fmt.Printf("%s - %s\n", cmd.Name, cmd.Description)
 	fmt.Println()
 	if cmd.Usage != "" {
@@ -298,8 +357,8 @@ func (c *CLI) showCommandHelp(cmd *Command) error {
 	if len(cmd.Subcommands) > 0 {
 		fmt.Println("Subcommands:")
 		for name, subcmd := range cmd.Subcommands {
-			// Skip internal commands (prefixed with _)
-			if strings.HasPrefix(name, "_") {
+			// Skip internal commands (prefixed with _) and hidden commands
+			if strings.HasPrefix(name, "_") || subcmd.Hidden {
 				continue
 			}
 			fmt.Printf("  %-15s %s\n", name, subcmd.Description)
@@ -319,6 +378,8 @@ func (c *CLI) registerCommands() {
 		Description: "Start the daemon (alias for 'daemon start')",
 		Usage:       "multiclaude start",
 		Run:         c.startDaemon,
+		Hidden:      true, // Alias - prefer 'daemon start'
+		Category:    "daemon",
 	}
 
 	// Root-level status command - comprehensive system overview
@@ -327,12 +388,14 @@ func (c *CLI) registerCommands() {
 		Description: "Show system status overview",
 		Usage:       "multiclaude status",
 		Run:         c.systemStatus,
+		Category:    "maint",
 	}
 
 	daemonCmd := &Command{
 		Name:        "daemon",
 		Description: "Manage the multiclaude daemon",
 		Subcommands: make(map[string]*Command),
+		Category:    "daemon",
 	}
 
 	daemonCmd.Subcommands["start"] = &Command{
@@ -377,6 +440,7 @@ func (c *CLI) registerCommands() {
 		Description: "Stop daemon and kill all multiclaude tmux sessions",
 		Usage:       "multiclaude stop-all [--clean] [--yes]",
 		Run:         c.stopAll,
+		Category:    "daemon",
 	}
 
 	// Repository commands (repo subcommand)
@@ -384,6 +448,7 @@ func (c *CLI) registerCommands() {
 		Name:        "repo",
 		Description: "Manage repositories",
 		Subcommands: make(map[string]*Command),
+		Category:    "repo",
 	}
 
 	repoCmd.Subcommands["init"] = &Command{
@@ -444,10 +509,18 @@ func (c *CLI) registerCommands() {
 
 	c.rootCmd.Subcommands["repo"] = repoCmd
 
-	// Backward compatibility aliases for root-level repo commands
-	c.rootCmd.Subcommands["init"] = repoCmd.Subcommands["init"]
-	c.rootCmd.Subcommands["list"] = repoCmd.Subcommands["list"]
-	c.rootCmd.Subcommands["history"] = repoCmd.Subcommands["history"]
+	// Backward compatibility aliases for root-level repo commands (hidden)
+	initAlias := *repoCmd.Subcommands["init"]
+	initAlias.Hidden = true
+	c.rootCmd.Subcommands["init"] = &initAlias
+
+	listAlias := *repoCmd.Subcommands["list"]
+	listAlias.Hidden = true
+	c.rootCmd.Subcommands["list"] = &listAlias
+
+	historyAlias := *repoCmd.Subcommands["history"]
+	historyAlias.Hidden = true
+	c.rootCmd.Subcommands["history"] = &historyAlias
 
 	// Worker commands
 	workerCmd := &Command{
@@ -455,6 +528,7 @@ func (c *CLI) registerCommands() {
 		Description: "Manage worker agents",
 		Usage:       "multiclaude worker [<task>] [--repo <repo>] [--branch <branch>] [--push-to <branch>]",
 		Subcommands: make(map[string]*Command),
+		Category:    "agent",
 	}
 
 	workerCmd.Run = c.createWorker // Default action for 'worker' command (same as 'worker create')
@@ -482,8 +556,10 @@ func (c *CLI) registerCommands() {
 
 	c.rootCmd.Subcommands["worker"] = workerCmd
 
-	// 'work' is an alias for 'worker' (backward compatibility)
-	c.rootCmd.Subcommands["work"] = workerCmd
+	// 'work' is an alias for 'worker' (backward compatibility, hidden)
+	workAlias := *workerCmd
+	workAlias.Hidden = true
+	c.rootCmd.Subcommands["work"] = &workAlias
 
 	// Workspace commands
 	workspaceCmd := &Command{
@@ -491,6 +567,7 @@ func (c *CLI) registerCommands() {
 		Description: "Manage workspaces",
 		Usage:       "multiclaude workspace [<name>]",
 		Subcommands: make(map[string]*Command),
+		Category:    "agent",
 	}
 
 	workspaceCmd.Run = c.workspaceDefault // Default action: list or connect
@@ -530,6 +607,7 @@ func (c *CLI) registerCommands() {
 		Name:        "agent",
 		Description: "Agent communication commands",
 		Subcommands: make(map[string]*Command),
+		Category:    "agent",
 	}
 
 	// Legacy message commands (aliases for backward compatibility)
@@ -591,6 +669,7 @@ func (c *CLI) registerCommands() {
 		Name:        "message",
 		Description: "Manage inter-agent messages",
 		Subcommands: make(map[string]*Command),
+		Category:    "comm",
 	}
 
 	messageCmd.Subcommands["send"] = &Command{
@@ -623,8 +702,10 @@ func (c *CLI) registerCommands() {
 
 	c.rootCmd.Subcommands["message"] = messageCmd
 
-	// 'attach' is an alias for 'agent attach' (backward compatibility)
-	c.rootCmd.Subcommands["attach"] = agentCmd.Subcommands["attach"]
+	// 'attach' is an alias for 'agent attach' (backward compatibility, hidden)
+	attachAlias := *agentCmd.Subcommands["attach"]
+	attachAlias.Hidden = true
+	c.rootCmd.Subcommands["attach"] = &attachAlias
 
 	// Maintenance commands
 	c.rootCmd.Subcommands["cleanup"] = &Command{
@@ -632,6 +713,7 @@ func (c *CLI) registerCommands() {
 		Description: "Clean up orphaned resources",
 		Usage:       "multiclaude cleanup [--dry-run] [--verbose] [--merged]",
 		Run:         c.cleanup,
+		Category:    "maint",
 	}
 
 	c.rootCmd.Subcommands["repair"] = &Command{
@@ -639,6 +721,7 @@ func (c *CLI) registerCommands() {
 		Description: "Repair state after crash",
 		Usage:       "multiclaude repair [--verbose]",
 		Run:         c.repair,
+		Category:    "maint",
 	}
 
 	c.rootCmd.Subcommands["refresh"] = &Command{
@@ -646,6 +729,7 @@ func (c *CLI) registerCommands() {
 		Description: "Sync agent worktrees with main branch",
 		Usage:       "multiclaude refresh",
 		Run:         c.refresh,
+		Category:    "maint",
 	}
 
 	// Claude restart command - for resuming Claude after exit
@@ -654,6 +738,7 @@ func (c *CLI) registerCommands() {
 		Description: "Restart Claude in current agent context",
 		Usage:       "multiclaude claude",
 		Run:         c.restartClaude,
+		Category:    "agent",
 	}
 
 	// Debug command
@@ -662,6 +747,7 @@ func (c *CLI) registerCommands() {
 		Description: "Show generated CLI documentation",
 		Usage:       "multiclaude docs",
 		Run:         c.showDocs,
+		Category:    "meta",
 	}
 
 	// Review command
@@ -670,6 +756,7 @@ func (c *CLI) registerCommands() {
 		Description: "Spawn a review agent for a PR",
 		Usage:       "multiclaude review <pr-url>",
 		Run:         c.reviewPR,
+		Category:    "agent",
 	}
 
 	// Logs commands
@@ -678,6 +765,7 @@ func (c *CLI) registerCommands() {
 		Description: "View and manage agent output logs",
 		Usage:       "multiclaude logs [<agent-name>] [-f|--follow]",
 		Subcommands: make(map[string]*Command),
+		Category:    "maint",
 	}
 
 	logsCmd.Run = c.viewLogs // Default action: view logs for an agent
@@ -711,6 +799,7 @@ func (c *CLI) registerCommands() {
 		Description: "View or modify repository configuration",
 		Usage:       "multiclaude config [repo] [--mq-enabled=true|false] [--mq-track=all|author|assigned] [--ps-enabled=true|false] [--ps-track=all|author|assigned]",
 		Run:         c.configRepo,
+		Category:    "repo",
 	}
 
 	// Bug report command
@@ -719,6 +808,7 @@ func (c *CLI) registerCommands() {
 		Description: "Generate a diagnostic bug report",
 		Usage:       "multiclaude bug [--output <file>] [--verbose] [description]",
 		Run:         c.bugReport,
+		Category:    "meta",
 	}
 
 	// Diagnostics command
@@ -727,6 +817,7 @@ func (c *CLI) registerCommands() {
 		Description: "Show system diagnostics in machine-readable format",
 		Usage:       "multiclaude diagnostics [--json] [--output <file>]",
 		Run:         c.diagnostics,
+		Category:    "meta",
 	}
 
 	// Version command
@@ -735,6 +826,7 @@ func (c *CLI) registerCommands() {
 		Description: "Show version information",
 		Usage:       "multiclaude version [--json]",
 		Run:         c.versionCommand,
+		Category:    "meta",
 	}
 
 	// Agents command - for managing agent definitions
@@ -742,6 +834,7 @@ func (c *CLI) registerCommands() {
 		Name:        "agents",
 		Description: "Manage agent definitions",
 		Subcommands: make(map[string]*Command),
+		Category:    "agent",
 	}
 
 	agentsCmd.Subcommands["list"] = &Command{

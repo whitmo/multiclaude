@@ -1,13 +1,22 @@
 # Commands Reference
 
-Everything you can tell multiclaude to do.
+Everything you can tell multiclaude to do. Run `multiclaude` with no arguments for a quick reference.
+
+## Quick Start
+
+```bash
+multiclaude repo init <github-url>    # Track a repository
+multiclaude start                     # Start the daemon (alias for daemon start)
+multiclaude worker "task"             # Create a worker for a task
+multiclaude status                    # See what's running
+```
 
 ## Daemon
 
 The daemon is the brain. Start it, and agents come alive.
 
 ```bash
-multiclaude start              # Wake up
+multiclaude daemon start       # Wake up
 multiclaude daemon stop        # Go to sleep
 multiclaude daemon status      # You alive?
 multiclaude daemon logs -f     # What are you thinking?
