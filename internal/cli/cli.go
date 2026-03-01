@@ -5815,76 +5815,37 @@ func (c *CLI) localRepair(verbose bool) error {
 
 // ensureCoreAgents ensures that all core agents (supervisor, merge-queue/pr-shepherd) exist
 // for a repository. Returns counts of agents created.
+// This is the offline fallback; when the daemon is running, repair delegates to it instead.
 func (c *CLI) ensureCoreAgents(st *state.State, repoName string, verbose bool) (int, error) {
 	repo, exists := st.GetRepo(repoName)
 	if !exists {
 		return 0, fmt.Errorf("repository %s not found in state", repoName)
 	}
 
-	created := 0
 	repoPath := c.paths.RepoDir(repoName)
-	tmuxSession := repo.TmuxSession
 	tmuxClient := tmux.NewClient()
 
 	// Check if session exists
-	hasSession, err := tmuxClient.HasSession(context.Background(), tmuxSession)
+	hasSession, err := tmuxClient.HasSession(context.Background(), repo.TmuxSession)
 	if err != nil || !hasSession {
 		if verbose {
-			fmt.Printf("  Tmux session %s not found, skipping core agent creation\n", tmuxSession)
+			fmt.Printf("  Tmux session %s not found, skipping core agent creation\n", repo.TmuxSession)
 		}
 		return 0, nil
 	}
 
-	// Ensure supervisor exists
-	if _, exists := repo.Agents["supervisor"]; !exists {
+	// Use shared logic to determine which agents are missing
+	missing := state.MissingCoreAgents(repo)
+	created := 0
+
+	for _, spec := range missing {
 		if verbose {
-			fmt.Println("  Creating missing supervisor agent...")
+			fmt.Printf("  Creating missing %s agent...\n", spec.Name)
 		}
-		if err := c.createCoreAgent(st, repo, repoName, repoPath, "supervisor", state.AgentTypeSupervisor, tmuxClient); err != nil {
-			return created, fmt.Errorf("failed to create supervisor: %w", err)
+		if err := c.createCoreAgent(st, repo, repoName, repoPath, spec.Name, spec.Type, tmuxClient); err != nil {
+			return created, fmt.Errorf("failed to create %s: %w", spec.Name, err)
 		}
 		created++
-	}
-
-	// Determine if we should have merge-queue or pr-shepherd
-	isFork := repo.ForkConfig.IsFork || repo.ForkConfig.ForceForkMode
-	mqConfig := repo.MergeQueueConfig
-	psConfig := repo.PRShepherdConfig
-
-	// Default configs if not set
-	if mqConfig.TrackMode == "" {
-		mqConfig = state.DefaultMergeQueueConfig()
-	}
-	if psConfig.TrackMode == "" {
-		psConfig = state.DefaultPRShepherdConfig()
-	}
-
-	if isFork {
-		// Fork mode: ensure pr-shepherd if enabled
-		if psConfig.Enabled {
-			if _, exists := repo.Agents["pr-shepherd"]; !exists {
-				if verbose {
-					fmt.Println("  Creating missing pr-shepherd agent...")
-				}
-				if err := c.createCoreAgent(st, repo, repoName, repoPath, "pr-shepherd", state.AgentTypePRShepherd, tmuxClient); err != nil {
-					return created, fmt.Errorf("failed to create pr-shepherd: %w", err)
-				}
-				created++
-			}
-		}
-	} else {
-		// Non-fork mode: ensure merge-queue if enabled
-		if mqConfig.Enabled {
-			if _, exists := repo.Agents["merge-queue"]; !exists {
-				if verbose {
-					fmt.Println("  Creating missing merge-queue agent...")
-				}
-				if err := c.createCoreAgent(st, repo, repoName, repoPath, "merge-queue", state.AgentTypeMergeQueue, tmuxClient); err != nil {
-					return created, fmt.Errorf("failed to create merge-queue: %w", err)
-				}
-				created++
-			}
-		}
 	}
 
 	return created, nil
@@ -5984,16 +5945,7 @@ func (c *CLI) ensureDefaultWorkspace(st *state.State, repoName string, verbose b
 		return false, fmt.Errorf("repository %s not found in state", repoName)
 	}
 
-	// Check if any workspace already exists
-	hasWorkspace := false
-	for _, agent := range repo.Agents {
-		if agent.Type == state.AgentTypeWorkspace {
-			hasWorkspace = true
-			break
-		}
-	}
-
-	if hasWorkspace {
+	if repo.HasWorkspace() {
 		return false, nil // Workspace already exists
 	}
 

@@ -1296,8 +1296,6 @@ func (d *Daemon) ensureCoreAgents(repoName string) (int, error) {
 		return 0, fmt.Errorf("repository %s not found in state", repoName)
 	}
 
-	created := 0
-
 	// Check if session exists
 	hasSession, err := d.tmux.HasSession(d.ctx, repo.TmuxSession)
 	if err != nil || !hasSession {
@@ -1305,50 +1303,16 @@ func (d *Daemon) ensureCoreAgents(repoName string) (int, error) {
 		return 0, nil
 	}
 
-	// Ensure supervisor exists
-	if _, exists := repo.Agents["supervisor"]; !exists {
-		d.logger.Info("Creating missing supervisor agent for %s", repoName)
-		if err := d.spawnCoreAgent(repoName, "supervisor", state.AgentTypeSupervisor); err != nil {
-			return created, fmt.Errorf("failed to create supervisor: %w", err)
+	// Use shared logic to determine which agents are missing
+	missing := state.MissingCoreAgents(repo)
+	created := 0
+
+	for _, spec := range missing {
+		d.logger.Info("Creating missing %s agent for %s", spec.Name, repoName)
+		if err := d.spawnCoreAgent(repoName, spec.Name, spec.Type); err != nil {
+			return created, fmt.Errorf("failed to create %s: %w", spec.Name, err)
 		}
 		created++
-	}
-
-	// Determine if we should have merge-queue or pr-shepherd
-	isFork := repo.ForkConfig.IsFork || repo.ForkConfig.ForceForkMode
-	mqConfig := repo.MergeQueueConfig
-	psConfig := repo.PRShepherdConfig
-
-	// Default configs if not set
-	if mqConfig.TrackMode == "" {
-		mqConfig = state.DefaultMergeQueueConfig()
-	}
-	if psConfig.TrackMode == "" {
-		psConfig = state.DefaultPRShepherdConfig()
-	}
-
-	if isFork {
-		// Fork mode: ensure pr-shepherd if enabled
-		if psConfig.Enabled {
-			if _, exists := repo.Agents["pr-shepherd"]; !exists {
-				d.logger.Info("Creating missing pr-shepherd agent for %s", repoName)
-				if err := d.spawnCoreAgent(repoName, "pr-shepherd", state.AgentTypePRShepherd); err != nil {
-					return created, fmt.Errorf("failed to create pr-shepherd: %w", err)
-				}
-				created++
-			}
-		}
-	} else {
-		// Non-fork mode: ensure merge-queue if enabled
-		if mqConfig.Enabled {
-			if _, exists := repo.Agents["merge-queue"]; !exists {
-				d.logger.Info("Creating missing merge-queue agent for %s", repoName)
-				if err := d.spawnCoreAgent(repoName, "merge-queue", state.AgentTypeMergeQueue); err != nil {
-					return created, fmt.Errorf("failed to create merge-queue: %w", err)
-				}
-				created++
-			}
-		}
 	}
 
 	return created, nil
@@ -1385,16 +1349,7 @@ func (d *Daemon) ensureDefaultWorkspace(repoName string) (bool, error) {
 		return false, fmt.Errorf("repository %s not found in state", repoName)
 	}
 
-	// Check if any workspace already exists
-	hasWorkspace := false
-	for _, agent := range repo.Agents {
-		if agent.Type == state.AgentTypeWorkspace {
-			hasWorkspace = true
-			break
-		}
-	}
-
-	if hasWorkspace {
+	if repo.HasWorkspace() {
 		return false, nil // Workspace already exists
 	}
 
@@ -1409,7 +1364,6 @@ func (d *Daemon) ensureDefaultWorkspace(repoName string) (bool, error) {
 	workspaceName := "my-default-2"
 	d.logger.Info("Creating default workspace '%s' for %s", workspaceName, repoName)
 
-	// We need to manually create the workspace
 	repoPath := d.paths.RepoDir(repoName)
 	wt := worktree.NewManager(repoPath)
 	wtPath := d.paths.AgentWorktree(repoName, workspaceName)
@@ -1420,7 +1374,7 @@ func (d *Daemon) ensureDefaultWorkspace(repoName string) (bool, error) {
 		return false, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
-	// Create tmux window using exec.Command
+	// Create tmux window
 	cmd := exec.Command("tmux", "new-window", "-d", "-t", repo.TmuxSession, "-n", workspaceName, "-c", wtPath)
 	if err := cmd.Run(); err != nil {
 		return false, fmt.Errorf("failed to create tmux window: %w", err)
@@ -1432,17 +1386,9 @@ func (d *Daemon) ensureDefaultWorkspace(repoName string) (bool, error) {
 		return false, fmt.Errorf("failed to generate session ID: %w", err)
 	}
 
-	// Write prompt file
-	promptContent, err := prompts.GetPrompt(repoPath, state.AgentTypeWorkspace, "")
+	// Write prompt file using the standard helper (consistent with restartAgent)
+	promptFile, err := d.writePromptFile(repoName, state.AgentTypeWorkspace, workspaceName)
 	if err != nil {
-		return false, fmt.Errorf("failed to get workspace prompt: %w", err)
-	}
-
-	promptFile := filepath.Join(d.paths.Root, "prompts", workspaceName+".md")
-	if err := os.MkdirAll(filepath.Dir(promptFile), 0755); err != nil {
-		return false, fmt.Errorf("failed to create prompts directory: %w", err)
-	}
-	if err := os.WriteFile(promptFile, []byte(promptContent), 0644); err != nil {
 		return false, fmt.Errorf("failed to write prompt file: %w", err)
 	}
 
@@ -1454,34 +1400,15 @@ func (d *Daemon) ensureDefaultWorkspace(repoName string) (bool, error) {
 	// Start Claude (skip in test mode)
 	var pid int
 	if os.Getenv("MULTICLAUDE_TEST_MODE") != "1" {
-		// Find Claude binary
-		claudeBinary, err := exec.LookPath("claude")
+		result, err := d.claudeRunner.Start(d.ctx, repo.TmuxSession, workspaceName, claude.Config{
+			SessionID:        sessionID,
+			Resume:           false,
+			SystemPromptFile: promptFile,
+		})
 		if err != nil {
-			return false, fmt.Errorf("failed to find claude binary: %w", err)
+			return false, fmt.Errorf("failed to start Claude: %w", err)
 		}
-
-		// Build Claude command
-		claudeCmd := fmt.Sprintf("%s --session-id %s --dangerously-skip-permissions", claudeBinary, sessionID)
-		if promptFile != "" {
-			claudeCmd += fmt.Sprintf(" --append-system-prompt-file %s", promptFile)
-		}
-
-		// Send command to tmux window
-		target := fmt.Sprintf("%s:%s", repo.TmuxSession, workspaceName)
-		cmd = exec.Command("tmux", "send-keys", "-t", target, claudeCmd, "C-m")
-		if err := cmd.Run(); err != nil {
-			return false, fmt.Errorf("failed to start Claude in tmux: %w", err)
-		}
-
-		// Wait for Claude to start
-		time.Sleep(500 * time.Millisecond)
-
-		// Get PID
-		pid, err = d.tmux.GetPanePID(d.ctx, repo.TmuxSession, workspaceName)
-		if err != nil {
-			d.logger.Warn("Failed to get Claude PID for workspace: %v", err)
-			pid = 0
-		}
+		pid = result.PID
 	}
 
 	// Register workspace with state
