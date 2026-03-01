@@ -728,12 +728,17 @@ func (d *Daemon) handleListRepos(req socket.Request) socket.Response {
 	// Return detailed repo info
 	repoDetails := make([]map[string]interface{}, 0, len(repos))
 	for repoName, repo := range repos {
-		// Count agents by type
-		workerCount := 0
-		totalAgents := len(repo.Agents)
-		for _, agent := range repo.Agents {
+		// Group agents by type
+		workerNames := []string{}
+		coreAgents := []map[string]string{} // name -> type for core agents
+		for agentName, agent := range repo.Agents {
 			if agent.Type == state.AgentTypeWorker {
-				workerCount++
+				workerNames = append(workerNames, agentName)
+			} else {
+				coreAgents = append(coreAgents, map[string]string{
+					"name": agentName,
+					"type": string(agent.Type),
+				})
 			}
 		}
 
@@ -753,8 +758,10 @@ func (d *Daemon) handleListRepos(req socket.Request) socket.Response {
 			"name":               repoName,
 			"github_url":         repo.GithubURL,
 			"tmux_session":       repo.TmuxSession,
-			"total_agents":       totalAgents,
-			"worker_count":       workerCount,
+			"total_agents":       len(repo.Agents),
+			"worker_count":       len(workerNames),
+			"worker_names":       workerNames,
+			"core_agents":        coreAgents,
 			"session_healthy":    sessionHealthy,
 			"is_fork":            repo.ForkConfig.IsFork,
 			"upstream_owner":     repo.ForkConfig.UpstreamOwner,

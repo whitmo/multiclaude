@@ -74,13 +74,14 @@ func IsDevVersion() bool {
 
 // Command represents a CLI command
 type Command struct {
-	Name        string
-	Description string
-	Usage       string
-	Run         func(args []string) error
-	Subcommands map[string]*Command
-	Hidden      bool   // Don't show in --help (for aliases)
-	Category    string // For grouping in help output
+	Name            string
+	Description     string
+	LongDescription string // Detailed help text shown with --help
+	Usage           string
+	Run             func(args []string) error
+	Subcommands     map[string]*Command
+	Hidden          bool   // Don't show in --help (for aliases)
+	Category        string // For grouping in help output
 }
 
 // CLI manages the command-line interface
@@ -354,6 +355,11 @@ func (c *CLI) showCommandHelp(cmd *Command) error {
 		fmt.Println()
 	}
 
+	if cmd.LongDescription != "" {
+		fmt.Println(cmd.LongDescription)
+		fmt.Println()
+	}
+
 	if len(cmd.Subcommands) > 0 {
 		fmt.Println("Subcommands:")
 		for name, subcmd := range cmd.Subcommands {
@@ -503,8 +509,27 @@ func (c *CLI) registerCommands() {
 	repoCmd.Subcommands["hibernate"] = &Command{
 		Name:        "hibernate",
 		Description: "Hibernate a repository, archiving uncommitted changes",
-		Usage:       "multiclaude repo hibernate [--repo <repo>] [--all] [--yes]",
-		Run:         c.hibernateRepo,
+		LongDescription: `Hibernating a repository STOPS ALL TOKEN CONSUMPTION by killing agents.
+
+Running agents (supervisor, merge-queue, workspace, workers) continuously
+consume API tokens even when idle. Use hibernate to pause billing.
+
+Options:
+  --repo <name>  Repository to hibernate (auto-detected if in worktree)
+  --all          Also hibernate persistent agents (supervisor, workspace)
+  --yes          Skip confirmation prompt
+
+By default, only workers and review agents are hibernated. Use --all to
+stop ALL agents including supervisor, merge-queue, and workspace.
+
+Uncommitted changes are archived to ~/.multiclaude/archives/<repo>/ and
+can be recovered later.
+
+Example:
+  multiclaude repo hibernate --all    # Stop all agents, stop token usage
+  multiclaude repo hibernate          # Stop workers only, core agents remain`,
+		Usage: "multiclaude repo hibernate [--repo <repo>] [--all] [--yes]",
+		Run:   c.hibernateRepo,
 	}
 
 	c.rootCmd.Subcommands["repo"] = repoCmd
@@ -984,6 +1009,9 @@ func (c *CLI) systemStatus(args []string) error {
 	fmt.Printf("  Repos:  %d\n", len(repos))
 	fmt.Println()
 
+	// Track total active agents for token warning
+	totalActiveAgents := 0
+
 	// Show each repo with agents
 	for _, repo := range repos {
 		repoMap, ok := repo.(map[string]interface{})
@@ -996,10 +1024,8 @@ func (c *CLI) systemStatus(args []string) error {
 		if v, ok := repoMap["total_agents"].(float64); ok {
 			totalAgents = int(v)
 		}
-		workerCount := 0
-		if v, ok := repoMap["worker_count"].(float64); ok {
-			workerCount = int(v)
-		}
+		totalActiveAgents += totalAgents
+
 		sessionHealthy, _ := repoMap["session_healthy"].(bool)
 
 		// Repo line
@@ -1009,12 +1035,31 @@ func (c *CLI) systemStatus(args []string) error {
 		}
 		fmt.Printf("  %s %s\n", repoStatus, format.Bold.Sprint(name))
 
-		// Agent summary
-		coreAgents := totalAgents - workerCount
-		if coreAgents < 0 {
-			coreAgents = 0
+		// Show core agents by name and type
+		if coreAgents, ok := repoMap["core_agents"].([]interface{}); ok && len(coreAgents) > 0 {
+			var coreNames []string
+			for _, ca := range coreAgents {
+				if caMap, ok := ca.(map[string]interface{}); ok {
+					agentName, _ := caMap["name"].(string)
+					agentType, _ := caMap["type"].(string)
+					coreNames = append(coreNames, fmt.Sprintf("%s (%s)", agentName, agentType))
+				}
+			}
+			fmt.Printf("      Core:    %s\n", strings.Join(coreNames, ", "))
 		}
-		fmt.Printf("      Agents: %d core, %d workers\n", coreAgents, workerCount)
+
+		// Show workers
+		if workerNames, ok := repoMap["worker_names"].([]interface{}); ok && len(workerNames) > 0 {
+			var names []string
+			for _, wn := range workerNames {
+				if name, ok := wn.(string); ok {
+					names = append(names, name)
+				}
+			}
+			fmt.Printf("      Workers: %s\n", strings.Join(names, ", "))
+		} else {
+			fmt.Printf("      Workers: none\n")
+		}
 
 		// Show fork info if applicable
 		if isFork, _ := repoMap["is_fork"].(bool); isFork {
@@ -1027,6 +1072,16 @@ func (c *CLI) systemStatus(args []string) error {
 	}
 
 	fmt.Println()
+
+	// Token consumption warning
+	if totalActiveAgents > 0 {
+		fmt.Printf("  %s %d active agent(s) consuming API tokens\n",
+			format.Yellow.Sprint("⚠"),
+			totalActiveAgents)
+		format.Dimmed("  Stop token usage: multiclaude repo hibernate --all")
+		fmt.Println()
+	}
+
 	format.Dimmed("Details: multiclaude repo list | multiclaude worker list")
 	return nil
 }
