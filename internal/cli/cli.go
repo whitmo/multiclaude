@@ -87,6 +87,36 @@ type Command struct {
 	Category        string // For grouping in help output
 }
 
+// CommandSchema is a JSON-serializable representation of a command for LLM parsing
+type CommandSchema struct {
+	Name        string                    `json:"name"`
+	Description string                    `json:"description"`
+	Usage       string                    `json:"usage,omitempty"`
+	Subcommands map[string]*CommandSchema `json:"subcommands,omitempty"`
+}
+
+// toSchema converts a Command to its JSON-serializable schema
+func (cmd *Command) toSchema() *CommandSchema {
+	schema := &CommandSchema{
+		Name:        cmd.Name,
+		Description: cmd.Description,
+		Usage:       cmd.Usage,
+	}
+
+	if len(cmd.Subcommands) > 0 {
+		schema.Subcommands = make(map[string]*CommandSchema)
+		for name, subcmd := range cmd.Subcommands {
+			// Skip internal commands (prefixed with _)
+			if strings.HasPrefix(name, "_") {
+				continue
+			}
+			schema.Subcommands[name] = subcmd.toSchema()
+		}
+	}
+
+	return schema
+}
+
 // CLI manages the command-line interface
 type CLI struct {
 	rootCmd       *Command
@@ -210,12 +240,24 @@ func sanitizeTmuxSessionName(repoName string) string {
 // Execute executes the CLI with the given arguments
 func (c *CLI) Execute(args []string) error {
 	if len(args) == 0 {
-		return c.showHelp()
+		return c.showHelp(false)
 	}
 
 	// Check for --version or -v flag at top level
 	if args[0] == "--version" || args[0] == "-v" {
 		return c.showVersion()
+	}
+
+	// Check for --help or -h with optional --json at top level
+	if args[0] == "--help" || args[0] == "-h" {
+		flags, _ := ParseFlags(args)
+		outputJSON := flags["json"] == "true"
+		return c.showHelp(outputJSON)
+	}
+
+	// Check for --json alone (output full command tree)
+	if args[0] == "--json" {
+		return c.showHelp(true)
 	}
 
 	return c.executeCommand(c.rootCmd, args)
@@ -255,12 +297,19 @@ func (c *CLI) executeCommand(cmd *Command, args []string) error {
 		if cmd.Run != nil {
 			return cmd.Run([]string{})
 		}
-		return c.showCommandHelp(cmd)
+		return c.showCommandHelp(cmd, false)
 	}
 
-	// Check for --help or -h flag
+	// Check for --help or -h flag with optional --json
 	if args[0] == "--help" || args[0] == "-h" {
-		return c.showCommandHelp(cmd)
+		flags, _ := ParseFlags(args)
+		outputJSON := flags["json"] == "true"
+		return c.showCommandHelp(cmd, outputJSON)
+	}
+
+	// Check for --json alone (output command schema)
+	if args[0] == "--json" {
+		return c.showCommandHelp(cmd, true)
 	}
 
 	// Check for subcommands
@@ -277,7 +326,14 @@ func (c *CLI) executeCommand(cmd *Command, args []string) error {
 }
 
 // showHelp shows the main help message
-func (c *CLI) showHelp() error {
+func (c *CLI) showHelp(outputJSON bool) error {
+	if outputJSON {
+		schema := c.rootCmd.toSchema()
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(schema)
+	}
+
 	fmt.Println("multiclaude - repo-centric orchestrator for Claude Code")
 	fmt.Println()
 	fmt.Println("QUICK START:")
@@ -341,14 +397,22 @@ func (c *CLI) showHelp() error {
 	}
 
 	fmt.Println("Run 'multiclaude <command> --help' for details.")
+	fmt.Println("Use 'multiclaude --json' for machine-readable command tree (LLM-friendly).")
 	return nil
 }
 
 // showCommandHelp shows help for a specific command
-func (c *CLI) showCommandHelp(cmd *Command) error {
+func (c *CLI) showCommandHelp(cmd *Command, outputJSON bool) error {
+	if outputJSON {
+		schema := cmd.toSchema()
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(schema)
+	}
+
 	// If this is the root command, use the categorized help
 	if cmd == c.rootCmd {
-		return c.showHelp()
+		return c.showHelp(false)
 	}
 
 	fmt.Printf("%s - %s\n", cmd.Name, cmd.Description)
