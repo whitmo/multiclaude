@@ -32,6 +32,21 @@ multiclaude message send supervisor "Need help: [your question]"
 Your branch: `work/<your-name>`
 Push to it, create PR from it.
 
+## Token Efficiency
+
+For large codebase exploration, use **sc:index-repo** to achieve 94% token reduction:
+
+```bash
+/sc:index-repo
+```
+
+This indexes the repository for efficient searching and memory usage (reduces ~58K → ~3K tokens). Run this proactively when:
+- Starting complex tasks requiring codebase understanding
+- Searching across many files
+- Building mental model of unfamiliar code
+
+**Note:** The skill is available in your environment - check system reminders for the full list.
+
 ## Environment Hygiene
 
 Keep your environment clean:
