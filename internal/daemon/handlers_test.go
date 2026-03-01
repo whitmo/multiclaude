@@ -2033,3 +2033,145 @@ func TestHandleGetRepoConfigTableDriven(t *testing.T) {
 		})
 	}
 }
+
+// =============================================================================
+// Tests for PR #338: handleListRepos enriched response
+// =============================================================================
+
+func TestHandleListReposRichAgentBreakdown(t *testing.T) {
+	tests := []struct {
+		name            string
+		setupState      func(*state.State)
+		wantRepoCount   int
+		wantTotalAgents int
+		wantWorkerCount int
+	}{
+		{
+			name: "empty repo",
+			setupState: func(s *state.State) {
+				s.AddRepo("test-repo", &state.Repository{
+					GithubURL:   "https://github.com/test/repo",
+					TmuxSession: "mc-test",
+					Agents:      make(map[string]state.Agent),
+				})
+			},
+			wantRepoCount:   1,
+			wantTotalAgents: 0,
+			wantWorkerCount: 0,
+		},
+		{
+			name: "repo with mixed agents",
+			setupState: func(s *state.State) {
+				s.AddRepo("test-repo", &state.Repository{
+					GithubURL:   "https://github.com/test/repo",
+					TmuxSession: "mc-test",
+					Agents:      make(map[string]state.Agent),
+				})
+				s.AddAgent("test-repo", "supervisor", state.Agent{
+					Type:       state.AgentTypeSupervisor,
+					TmuxWindow: "supervisor",
+					CreatedAt:  time.Now(),
+				})
+				s.AddAgent("test-repo", "worker-1", state.Agent{
+					Type:       state.AgentTypeWorker,
+					TmuxWindow: "worker-1",
+					Task:       "fix bug",
+					CreatedAt:  time.Now(),
+				})
+			},
+			wantRepoCount:   1,
+			wantTotalAgents: 2,
+			wantWorkerCount: 1,
+		},
+		{
+			name: "repo with only core agents",
+			setupState: func(s *state.State) {
+				s.AddRepo("test-repo", &state.Repository{
+					GithubURL:   "https://github.com/test/repo",
+					TmuxSession: "mc-test",
+					Agents:      make(map[string]state.Agent),
+				})
+				s.AddAgent("test-repo", "supervisor", state.Agent{
+					Type:       state.AgentTypeSupervisor,
+					TmuxWindow: "supervisor",
+					CreatedAt:  time.Now(),
+				})
+			},
+			wantRepoCount:   1,
+			wantTotalAgents: 1,
+			wantWorkerCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, cleanup := setupTestDaemonWithState(t, tt.setupState)
+			defer cleanup()
+
+			resp := d.handleListRepos(socket.Request{
+				Command: "list_repos",
+				Args:    map[string]interface{}{"rich": true},
+			})
+
+			if !resp.Success {
+				t.Fatalf("handleListRepos() failed: %s", resp.Error)
+			}
+
+			repos, ok := resp.Data.([]map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected []map[string]interface{}, got %T", resp.Data)
+			}
+
+			if len(repos) != tt.wantRepoCount {
+				t.Errorf("repo count = %d, want %d", len(repos), tt.wantRepoCount)
+			}
+
+			if len(repos) > 0 {
+				repo := repos[0]
+
+				totalAgents, _ := repo["total_agents"].(int)
+				if totalAgents != tt.wantTotalAgents {
+					t.Errorf("total_agents = %d, want %d", totalAgents, tt.wantTotalAgents)
+				}
+
+				workerCount, _ := repo["worker_count"].(int)
+				if workerCount != tt.wantWorkerCount {
+					t.Errorf("worker_count = %d, want %d", workerCount, tt.wantWorkerCount)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleListReposSimpleFormat(t *testing.T) {
+	d, cleanup := setupTestDaemonWithState(t, func(s *state.State) {
+		s.AddRepo("repo-a", &state.Repository{
+			GithubURL:   "https://github.com/test/repo-a",
+			TmuxSession: "mc-repo-a",
+			Agents:      make(map[string]state.Agent),
+		})
+		s.AddRepo("repo-b", &state.Repository{
+			GithubURL:   "https://github.com/test/repo-b",
+			TmuxSession: "mc-repo-b",
+			Agents:      make(map[string]state.Agent),
+		})
+	})
+	defer cleanup()
+
+	resp := d.handleListRepos(socket.Request{
+		Command: "list_repos",
+	})
+
+	if !resp.Success {
+		t.Fatalf("handleListRepos() failed: %s", resp.Error)
+	}
+
+	names, ok := resp.Data.([]string)
+	if !ok {
+		t.Fatalf("Expected []string for simple format, got %T", resp.Data)
+	}
+
+	if len(names) != 2 {
+		t.Errorf("Expected 2 repo names, got %d", len(names))
+	}
+}

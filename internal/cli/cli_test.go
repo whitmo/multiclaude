@@ -3902,3 +3902,377 @@ func TestLoadStateFunction(t *testing.T) {
 		}
 	})
 }
+
+// =============================================================================
+// Tests for PR #338: Token-aware status display and help improvements
+// =============================================================================
+
+func TestHibernateCommandIfExists(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repoCmd, ok := cli.rootCmd.Subcommands["repo"]
+	if !ok {
+		t.Fatal("Expected 'repo' command to exist")
+	}
+
+	hibernateCmd, ok := repoCmd.Subcommands["hibernate"]
+	if !ok {
+		t.Skip("hibernate subcommand not yet present")
+	}
+
+	if hibernateCmd.Description == "" {
+		t.Error("hibernate command should have a description")
+	}
+	if hibernateCmd.Usage == "" {
+		t.Error("hibernate command should have usage text")
+	}
+}
+
+func TestHibernateHelpRendering(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repoCmd, ok := cli.rootCmd.Subcommands["repo"]
+	if !ok {
+		t.Fatal("Expected 'repo' command to exist")
+	}
+
+	if _, ok := repoCmd.Subcommands["hibernate"]; !ok {
+		t.Skip("hibernate subcommand not yet present")
+	}
+
+	err := cli.Execute([]string{"repo", "hibernate", "--help"})
+	if err != nil {
+		t.Errorf("repo hibernate --help should not error: %v", err)
+	}
+}
+
+func TestShowCommandHelpBasic(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	cmd := &Command{
+		Name:        "test-help",
+		Description: "Test help rendering",
+		Usage:       "test-help [options]",
+	}
+
+	err := cli.showCommandHelp(cmd)
+	if err != nil {
+		t.Errorf("showCommandHelp() returned error: %v", err)
+	}
+}
+
+func TestHandleListReposRichResponseShape(t *testing.T) {
+	_, d, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test-repo",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.GetState().AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+	d.GetState().AddAgent("test-repo", "supervisor", state.Agent{
+		Type:       state.AgentTypeSupervisor,
+		TmuxWindow: "supervisor",
+	})
+	d.GetState().AddAgent("test-repo", "merge-queue", state.Agent{
+		Type:       state.AgentTypeMergeQueue,
+		TmuxWindow: "merge-queue",
+	})
+	d.GetState().AddAgent("test-repo", "happy-fox", state.Agent{
+		Type:       state.AgentTypeWorker,
+		TmuxWindow: "happy-fox",
+		Task:       "implement feature X",
+	})
+	d.GetState().AddAgent("test-repo", "clever-bear", state.Agent{
+		Type:       state.AgentTypeWorker,
+		TmuxWindow: "clever-bear",
+		Task:       "fix bug Y",
+	})
+
+	client := socket.NewClient(d.GetPaths().DaemonSock)
+	resp, err := client.Send(socket.Request{
+		Command: "list_repos",
+		Args:    map[string]interface{}{"rich": true},
+	})
+	if err != nil {
+		t.Fatalf("Failed to send request: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("list_repos failed: %s", resp.Error)
+	}
+
+	repos, ok := resp.Data.([]interface{})
+	if !ok {
+		t.Fatalf("Expected repos array, got %T", resp.Data)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("Expected 1 repo, got %d", len(repos))
+	}
+
+	repoMap, ok := repos[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected repo map, got %T", repos[0])
+	}
+
+	totalAgents, ok := repoMap["total_agents"].(float64)
+	if !ok {
+		t.Fatal("Expected total_agents field")
+	}
+	if int(totalAgents) != 4 {
+		t.Errorf("total_agents = %v, want 4", totalAgents)
+	}
+
+	workerCount, ok := repoMap["worker_count"].(float64)
+	if !ok {
+		t.Fatal("Expected worker_count field")
+	}
+	if int(workerCount) != 2 {
+		t.Errorf("worker_count = %v, want 2", workerCount)
+	}
+}
+
+func TestHandleListReposRichEmptyAgents(t *testing.T) {
+	_, d, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test-repo",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.GetState().AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	client := socket.NewClient(d.GetPaths().DaemonSock)
+	resp, err := client.Send(socket.Request{
+		Command: "list_repos",
+		Args:    map[string]interface{}{"rich": true},
+	})
+	if err != nil {
+		t.Fatalf("Failed to send request: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("list_repos failed: %s", resp.Error)
+	}
+
+	repos, ok := resp.Data.([]interface{})
+	if !ok {
+		t.Fatalf("Expected repos array, got %T", resp.Data)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("Expected 1 repo, got %d", len(repos))
+	}
+
+	repoMap := repos[0].(map[string]interface{})
+	totalAgents := repoMap["total_agents"].(float64)
+	if int(totalAgents) != 0 {
+		t.Errorf("total_agents = %v, want 0", totalAgents)
+	}
+	workerCount := repoMap["worker_count"].(float64)
+	if int(workerCount) != 0 {
+		t.Errorf("worker_count = %v, want 0", workerCount)
+	}
+}
+
+// =============================================================================
+// Tests for PR #339: Context-aware refresh with auto-detection
+// =============================================================================
+
+func TestRefreshContextDetectionFromWorktreePath(t *testing.T) {
+	tests := []struct {
+		name       string
+		cwdSuffix  string
+		wantRepo   string
+		wantAgent  string
+		wantDetect bool
+	}{
+		{
+			name:       "agent worktree path",
+			cwdSuffix:  "my-repo/happy-fox",
+			wantRepo:   "my-repo",
+			wantAgent:  "happy-fox",
+			wantDetect: true,
+		},
+		{
+			name:       "agent worktree with deep subdirectory",
+			cwdSuffix:  "my-repo/happy-fox/src/main",
+			wantRepo:   "my-repo",
+			wantAgent:  "happy-fox",
+			wantDetect: true,
+		},
+		{
+			name:       "repo-only path",
+			cwdSuffix:  "my-repo",
+			wantRepo:   "my-repo",
+			wantAgent:  "",
+			wantDetect: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir, err := os.MkdirTemp("", "refresh-ctx-test-*")
+			if err != nil {
+				t.Fatalf("Failed to create temp dir: %v", err)
+			}
+			defer os.RemoveAll(tmpDir)
+
+			tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+			wtsDir := filepath.Join(tmpDir, "wts")
+
+			testPath := filepath.Join(wtsDir, tt.cwdSuffix)
+			if err := os.MkdirAll(testPath, 0755); err != nil {
+				t.Fatalf("Failed to create test path: %v", err)
+			}
+
+			if !hasPathPrefix(testPath, wtsDir) {
+				t.Fatal("testPath should have wtsDir as prefix")
+			}
+
+			rel, err := filepath.Rel(wtsDir, testPath)
+			if err != nil {
+				t.Fatalf("filepath.Rel failed: %v", err)
+			}
+
+			parts := strings.SplitN(rel, string(filepath.Separator), 2)
+			detected := len(parts) >= 2 && parts[0] != "" && parts[1] != ""
+
+			if detected != tt.wantDetect {
+				t.Errorf("detection = %v, want %v (parts=%v)", detected, tt.wantDetect, parts)
+			}
+
+			if detected {
+				repoName := parts[0]
+				agentName := strings.SplitN(parts[1], string(filepath.Separator), 2)[0]
+				if repoName != tt.wantRepo {
+					t.Errorf("repoName = %q, want %q", repoName, tt.wantRepo)
+				}
+				if agentName != tt.wantAgent {
+					t.Errorf("agentName = %q, want %q", agentName, tt.wantAgent)
+				}
+			}
+		})
+	}
+}
+
+func TestRefreshParseFlagsAllFlag(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantAll bool
+	}{
+		{"no flags", []string{}, false},
+		{"all flag present", []string{"--all"}, true},
+		{"other flags without all", []string{"--repo", "my-repo"}, false},
+		{"all flag with other flags", []string{"--all", "--repo", "my-repo"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags, _ := ParseFlags(tt.args)
+			gotAll := flags["all"] == "true"
+			if gotAll != tt.wantAll {
+				t.Errorf("--all = %v, want %v (flags=%v)", gotAll, tt.wantAll, flags)
+			}
+		})
+	}
+}
+
+func TestRefreshUsageUpdated(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	refreshCmd, ok := cli.rootCmd.Subcommands["refresh"]
+	if !ok {
+		t.Fatal("Expected 'refresh' command to exist")
+	}
+
+	if refreshCmd.Usage == "" {
+		t.Error("refresh command should have a Usage string")
+	}
+	if refreshCmd.Description == "" {
+		t.Error("refresh command should have a description")
+	}
+}
+
+func TestContextDetectionEdgeCases(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		wtsDir    string
+		wantMatch bool
+	}{
+		{"path outside worktrees dir", "/home/user/projects/my-repo", "/home/user/.multiclaude/wts", false},
+		{"path is exactly the wts dir", "/home/user/.multiclaude/wts", "/home/user/.multiclaude/wts", true},
+		{"path with similar prefix", "/home/user/.multiclaude/wts-backup/repo/agent", "/home/user/.multiclaude/wts", false},
+		{"path with trailing separator", "/home/user/.multiclaude/wts/repo/agent", "/home/user/.multiclaude/wts/", true},
+		{"path with dotfiles", "/home/user/.multiclaude/wts/.hidden-repo/agent", "/home/user/.multiclaude/wts", true},
+		{"path with spaces", "/home/user/.multiclaude/wts/my repo/agent", "/home/user/.multiclaude/wts", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasPathPrefix(tt.path, tt.wtsDir)
+			if got != tt.wantMatch {
+				t.Errorf("hasPathPrefix(%q, %q) = %v, want %v", tt.path, tt.wtsDir, got, tt.wantMatch)
+			}
+		})
+	}
+}
+
+func TestRefreshCommandHelp(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	err := cli.Execute([]string{"refresh", "--help"})
+	if err != nil {
+		t.Errorf("refresh --help should not error: %v", err)
+	}
+}
+
+func TestAgentContextPathParsing(t *testing.T) {
+	tests := []struct {
+		name      string
+		rel       string
+		wantRepo  string
+		wantAgent string
+		wantOK    bool
+	}{
+		{"standard two-component", "multiclaude/happy-fox", "multiclaude", "happy-fox", true},
+		{"path with subdir", "multiclaude/happy-fox/internal/cli", "multiclaude", "happy-fox", true},
+		{"single component", "multiclaude", "", "", false},
+		{"empty relative path", ".", "", "", false},
+		{"repo with dots", "my.repo.name/agent-1", "my.repo.name", "agent-1", true},
+		{"repo with hyphens", "my-cool-repo/lively-otter", "my-cool-repo", "lively-otter", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parts := strings.SplitN(tt.rel, string(filepath.Separator), 2)
+			ok := len(parts) >= 2 && parts[0] != "" && parts[1] != ""
+
+			if ok != tt.wantOK {
+				t.Errorf("detection = %v, want %v (parts=%v)", ok, tt.wantOK, parts)
+				return
+			}
+
+			if ok {
+				repoName := parts[0]
+				agentName := strings.SplitN(parts[1], string(filepath.Separator), 2)[0]
+				if repoName != tt.wantRepo {
+					t.Errorf("repo = %q, want %q", repoName, tt.wantRepo)
+				}
+				if agentName != tt.wantAgent {
+					t.Errorf("agent = %q, want %q", agentName, tt.wantAgent)
+				}
+			}
+		})
+	}
+}
