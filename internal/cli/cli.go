@@ -752,7 +752,7 @@ Example:
 	c.rootCmd.Subcommands["refresh"] = &Command{
 		Name:        "refresh",
 		Description: "Sync agent worktrees with main branch",
-		Usage:       "multiclaude refresh",
+		Usage:       "multiclaude refresh [--all]",
 		Run:         c.refresh,
 		Category:    "maint",
 	}
@@ -5466,8 +5466,119 @@ func (c *CLI) repair(args []string) error {
 	return nil
 }
 
-// refresh triggers an immediate worktree sync for all agents
+// refresh syncs worktrees with main branch.
+// When run inside an agent worktree, refreshes just that worktree directly.
+// When run outside an agent context (or with --all), triggers global refresh via daemon.
 func (c *CLI) refresh(args []string) error {
+	flags, _ := ParseFlags(args)
+	refreshAll := flags["all"] == "true"
+
+	// If --all not specified, try to detect agent context
+	if !refreshAll {
+		cwd, err := os.Getwd()
+		if err == nil {
+			// Resolve symlinks for proper path comparison
+			if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+				cwd = resolved
+			}
+
+			// Check if we're in a worktree path: ~/.multiclaude/wts/<repo>/<agent>
+			if hasPathPrefix(cwd, c.paths.WorktreesDir) {
+				rel, err := filepath.Rel(c.paths.WorktreesDir, cwd)
+				if err == nil {
+					parts := strings.SplitN(rel, string(filepath.Separator), 2)
+					if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+						repoName := parts[0]
+						agentName := strings.SplitN(parts[1], string(filepath.Separator), 2)[0]
+						return c.refreshAgentWorktree(repoName, agentName, cwd)
+					}
+				}
+			}
+		}
+	}
+
+	// Global refresh via daemon
+	return c.refreshAllWorktrees()
+}
+
+// refreshAgentWorktree refreshes a single agent's worktree directly
+func (c *CLI) refreshAgentWorktree(repoName, agentName, wtPath string) error {
+	fmt.Printf("Refreshing worktree for %s/%s...\n", repoName, agentName)
+
+	// Get the repo path to determine remote/branch
+	repoPath := c.paths.RepoDir(repoName)
+	wt := worktree.NewManager(repoPath)
+
+	// Get remote and main branch
+	remote, err := wt.GetUpstreamRemote()
+	if err != nil {
+		return fmt.Errorf("failed to get remote: %w", err)
+	}
+
+	mainBranch, err := wt.GetDefaultBranch(remote)
+	if err != nil {
+		return fmt.Errorf("failed to get default branch: %w", err)
+	}
+
+	// Fetch latest from remote
+	fmt.Printf("Fetching from %s...\n", remote)
+	if err := wt.FetchRemote(remote); err != nil {
+		return fmt.Errorf("failed to fetch: %w", err)
+	}
+
+	// Check worktree state
+	wtState, err := worktree.GetWorktreeState(wtPath, remote, mainBranch)
+	if err != nil {
+		return fmt.Errorf("failed to get worktree state: %w", err)
+	}
+
+	if !wtState.CanRefresh {
+		fmt.Printf("✓ No refresh needed: %s\n", wtState.RefreshReason)
+		return nil
+	}
+
+	if wtState.CommitsBehind == 0 {
+		fmt.Println("✓ Already up to date")
+		return nil
+	}
+
+	fmt.Printf("Rebasing onto %s/%s (%d commits behind)...\n", remote, mainBranch, wtState.CommitsBehind)
+
+	// Perform the refresh
+	result := worktree.RefreshWorktree(wtPath, remote, mainBranch)
+
+	if result.Error != nil {
+		if result.HasConflicts {
+			fmt.Println("\n⚠ Rebase has conflicts in:")
+			for _, f := range result.ConflictFiles {
+				fmt.Printf("  - %s\n", f)
+			}
+			fmt.Println("\nResolve conflicts and run 'git rebase --continue', or 'git rebase --abort' to cancel.")
+			return fmt.Errorf("rebase conflicts")
+		}
+		return fmt.Errorf("refresh failed: %w", result.Error)
+	}
+
+	if result.Skipped {
+		fmt.Printf("✓ Skipped: %s\n", result.SkipReason)
+		return nil
+	}
+
+	fmt.Printf("✓ Successfully rebased %d commits\n", result.CommitsRebased)
+	if result.WasStashed {
+		if result.StashRestored {
+			fmt.Println("  (uncommitted changes were stashed and restored)")
+		} else {
+			fmt.Println("  ⚠ Warning: uncommitted changes were stashed but could not be restored")
+			fmt.Println("    Run 'git stash pop' to restore them manually")
+		}
+	}
+
+	return nil
+}
+
+// refreshAllWorktrees triggers a global refresh via the daemon
+func (c *CLI) refreshAllWorktrees() error {
 	// Connect to daemon
 	client := socket.NewClient(c.paths.DaemonSock)
 	_, err := client.Send(socket.Request{Command: "ping"})
@@ -5475,7 +5586,7 @@ func (c *CLI) refresh(args []string) error {
 		return errors.DaemonNotRunning()
 	}
 
-	fmt.Println("Triggering worktree refresh...")
+	fmt.Println("Triggering worktree refresh for all agents...")
 
 	resp, err := client.Send(socket.Request{
 		Command: "trigger_refresh",

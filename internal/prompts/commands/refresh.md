@@ -2,7 +2,22 @@
 
 Sync your worktree with the latest changes from the main branch.
 
-## Instructions
+## Quick Method (Recommended)
+
+Run this CLI command - it handles everything automatically:
+
+```bash
+multiclaude refresh
+```
+
+This will:
+- Detect your worktree context automatically
+- Fetch from the correct remote (upstream if fork, otherwise origin)
+- Stash any uncommitted changes
+- Rebase your branch onto main
+- Restore stashed changes
+
+## Manual Instructions (Alternative)
 
 1. First, determine the correct remote to use. Check if an upstream remote exists (indicates a fork):
    ```bash
