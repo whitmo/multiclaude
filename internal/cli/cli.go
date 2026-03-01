@@ -5753,6 +5753,7 @@ func (c *CLI) localRepair(verbose bool) error {
 	// Ensure core agents exist for each repository
 	agentsCreated := 0
 	workspacesCreated := 0
+	var repairErrors []string
 	for _, repoName := range st.ListRepos() {
 		if verbose {
 			fmt.Printf("\nEnsuring core agents for repository: %s\n", repoName)
@@ -5761,8 +5762,10 @@ func (c *CLI) localRepair(verbose bool) error {
 		// Ensure core agents (supervisor, merge-queue/pr-shepherd)
 		created, err := c.ensureCoreAgents(st, repoName, verbose)
 		if err != nil {
+			msg := fmt.Sprintf("repo %s: failed to ensure core agents: %v", repoName, err)
+			repairErrors = append(repairErrors, msg)
 			if verbose {
-				fmt.Printf("  Warning: failed to ensure core agents: %v\n", err)
+				fmt.Printf("  Warning: %s\n", msg)
 			}
 		} else {
 			agentsCreated += created
@@ -5771,8 +5774,10 @@ func (c *CLI) localRepair(verbose bool) error {
 		// Ensure default workspace exists
 		wsCreated, err := c.ensureDefaultWorkspace(st, repoName, verbose)
 		if err != nil {
+			msg := fmt.Sprintf("repo %s: failed to ensure default workspace: %v", repoName, err)
+			repairErrors = append(repairErrors, msg)
 			if verbose {
-				fmt.Printf("  Warning: failed to ensure default workspace: %v\n", err)
+				fmt.Printf("  Warning: %s\n", msg)
 			}
 		} else if wsCreated {
 			workspacesCreated++
@@ -5799,6 +5804,10 @@ func (c *CLI) localRepair(verbose bool) error {
 	}
 	if agentsRemoved == 0 && issuesFixed == 0 && agentsCreated == 0 && workspacesCreated == 0 {
 		fmt.Println("  No issues found, no changes needed")
+	}
+
+	if len(repairErrors) > 0 {
+		return fmt.Errorf("repair completed with %d error(s): %s", len(repairErrors), strings.Join(repairErrors, "; "))
 	}
 
 	return nil
