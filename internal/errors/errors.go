@@ -391,3 +391,173 @@ func WorkspaceNotFound(name, repo string) *CLIError {
 		Suggestion: fmt.Sprintf("multiclaude workspace list --repo %s", repo),
 	}
 }
+
+// RepoAlreadyExists creates an error for when trying to init an already tracked repo
+func RepoAlreadyExists(name string) *CLIError {
+	return &CLIError{
+		Category:   CategoryConfig,
+		Message:    fmt.Sprintf("repository '%s' is already initialized", name),
+		Suggestion: fmt.Sprintf("multiclaude repo rm %s  # to remove and re-init", name),
+	}
+}
+
+// DirectoryAlreadyExists creates an error for when a directory already exists
+func DirectoryAlreadyExists(path string) *CLIError {
+	return &CLIError{
+		Category:   CategoryConfig,
+		Message:    fmt.Sprintf("directory already exists: %s", path),
+		Suggestion: "remove the directory manually or choose a different name",
+	}
+}
+
+// WorkspaceAlreadyExists creates an error for when a workspace already exists
+func WorkspaceAlreadyExists(name, repo string) *CLIError {
+	return &CLIError{
+		Category:   CategoryConfig,
+		Message:    fmt.Sprintf("workspace '%s' already exists in repo '%s'", name, repo),
+		Suggestion: fmt.Sprintf("multiclaude workspace list --repo %s", repo),
+	}
+}
+
+// InvalidWorkspaceName creates an error for invalid workspace names
+func InvalidWorkspaceName(name, reason string) *CLIError {
+	return &CLIError{
+		Category:   CategoryUsage,
+		Message:    fmt.Sprintf("invalid workspace name '%s': %s", name, reason),
+		Suggestion: "workspace names should be alphanumeric with hyphens or underscores (e.g., 'my-workspace')",
+	}
+}
+
+// LogFileNotFound creates an error for when no log file exists for an agent
+func LogFileNotFound(agent, repo string) *CLIError {
+	return &CLIError{
+		Category:   CategoryNotFound,
+		Message:    fmt.Sprintf("no log file found for agent '%s' in repo '%s'", agent, repo),
+		Suggestion: "the agent may not have been started yet or logs may have been cleaned up",
+	}
+}
+
+// InvalidDuration creates an error for invalid duration format
+func InvalidDuration(value string) *CLIError {
+	return &CLIError{
+		Category:   CategoryUsage,
+		Message:    fmt.Sprintf("invalid duration: %s", value),
+		Suggestion: "use format like '7d' (days), '24h' (hours), or '30m' (minutes)",
+	}
+}
+
+// NoDefaultRepo creates an error for when no default repo is set and multiple exist
+func NoDefaultRepo() *CLIError {
+	return &CLIError{
+		Category:   CategoryUsage,
+		Message:    "could not determine which repository to use",
+		Suggestion: "use --repo flag, run 'multiclaude repo use <name>' to set a default, or run from within a tracked repository",
+	}
+}
+
+// StateLoadFailed creates an error for when state cannot be loaded
+func StateLoadFailed(cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    "failed to load multiclaude state",
+		Cause:      cause,
+		Suggestion: "try 'multiclaude repair' to fix corrupted state",
+	}
+}
+
+// SessionIDGenerationFailed creates an error for UUID generation failures
+func SessionIDGenerationFailed(agentType string, cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("failed to generate session ID for %s", agentType),
+		Cause:      cause,
+		Suggestion: "this is usually a transient error; try again",
+	}
+}
+
+// PromptWriteFailed creates an error for prompt file write failures
+func PromptWriteFailed(agentType string, cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("failed to write %s prompt file", agentType),
+		Cause:      cause,
+		Suggestion: "check disk space and permissions in ~/.multiclaude/",
+	}
+}
+
+// ClaudeStartFailed creates an error for Claude startup failures
+func ClaudeStartFailed(agentType string, cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("failed to start %s Claude instance", agentType),
+		Cause:      cause,
+		Suggestion: "check 'claude --version' works and tmux is running",
+	}
+}
+
+// AgentRegistrationFailed creates an error for agent registration failures
+func AgentRegistrationFailed(agentType string, cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("failed to register %s with daemon", agentType),
+		Cause:      cause,
+		Suggestion: "multiclaude daemon status",
+	}
+}
+
+// WorktreeCleanupNeeded creates an error when manual worktree cleanup is needed
+func WorktreeCleanupNeeded(path string, cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    "failed to clean up existing worktree",
+		Cause:      cause,
+		Suggestion: fmt.Sprintf("git worktree remove %s", path),
+	}
+}
+
+// TmuxWindowCleanupNeeded creates an error when manual tmux cleanup is needed
+func TmuxWindowCleanupNeeded(session, window string, cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    "failed to clean up existing tmux window",
+		Cause:      cause,
+		Suggestion: fmt.Sprintf("tmux kill-window -t %s:%s", session, window),
+	}
+}
+
+// TmuxSessionCleanupNeeded creates an error when manual tmux session cleanup is needed
+func TmuxSessionCleanupNeeded(session string, cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    "failed to clean up existing tmux session",
+		Cause:      cause,
+		Suggestion: fmt.Sprintf("tmux kill-session -t %s", session),
+	}
+}
+
+// InvalidTmuxSessionName creates an error for invalid tmux session names
+func InvalidTmuxSessionName(reason string) *CLIError {
+	return &CLIError{
+		Category:   CategoryUsage,
+		Message:    fmt.Sprintf("invalid tmux session name: %s", reason),
+		Suggestion: "repository name must not be empty and must be valid for tmux",
+	}
+}
+
+// WorkerNotFound creates an error for when a worker is not found
+func WorkerNotFound(name, repo string) *CLIError {
+	return &CLIError{
+		Category:   CategoryNotFound,
+		Message:    fmt.Sprintf("worker '%s' not found in repo '%s'", name, repo),
+		Suggestion: fmt.Sprintf("multiclaude worker list --repo %s", repo),
+	}
+}
+
+// AgentNoSessionID creates an error for agents without session IDs
+func AgentNoSessionID(name string) *CLIError {
+	return &CLIError{
+		Category:   CategoryConfig,
+		Message:    fmt.Sprintf("agent '%s' has no session ID", name),
+		Suggestion: "try removing and recreating the agent",
+	}
+}

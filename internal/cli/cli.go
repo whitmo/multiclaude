@@ -1377,16 +1377,16 @@ func (c *CLI) initRepo(args []string) error {
 	// Check if repository is already initialized
 	st, err := state.Load(c.paths.StateFile)
 	if err != nil {
-		return fmt.Errorf("failed to load state: %w", err)
+		return errors.StateLoadFailed(err)
 	}
 	if _, exists := st.GetRepo(repoName); exists {
-		return fmt.Errorf("repository '%s' is already initialized\nUse 'multiclaude repo rm %s' to remove it first, or choose a different name", repoName, repoName)
+		return errors.RepoAlreadyExists(repoName)
 	}
 
 	// Check if tmux session already exists (stale session from previous incomplete init)
 	tmuxSession := sanitizeTmuxSessionName(repoName)
 	if tmuxSession == "mc-" {
-		return fmt.Errorf("invalid tmux session name: repository name cannot be empty")
+		return errors.InvalidTmuxSessionName("repository name cannot be empty")
 	}
 	tmuxClient := tmux.NewClient()
 	if exists, err := tmuxClient.HasSession(context.Background(), tmuxSession); err == nil && exists {
@@ -1394,7 +1394,7 @@ func (c *CLI) initRepo(args []string) error {
 		fmt.Printf("This may be from a previous incomplete initialization.\n")
 		fmt.Printf("Auto-repairing: killing existing tmux session...\n")
 		if err := tmuxClient.KillSession(context.Background(), tmuxSession); err != nil {
-			return fmt.Errorf("failed to clean up existing tmux session: %w\nPlease manually kill it with: tmux kill-session -t %s", err, tmuxSession)
+			return errors.TmuxSessionCleanupNeeded(tmuxSession, err)
 		}
 		fmt.Println("✓ Cleaned up stale tmux session")
 	}
@@ -1402,7 +1402,7 @@ func (c *CLI) initRepo(args []string) error {
 	// Check if repository directory already exists
 	repoPath := c.paths.RepoDir(repoName)
 	if _, err := os.Stat(repoPath); err == nil {
-		return fmt.Errorf("directory already exists: %s\nRemove it manually or choose a different name", repoPath)
+		return errors.DirectoryAlreadyExists(repoPath)
 	}
 
 	// Clone repository
@@ -1482,38 +1482,38 @@ func (c *CLI) initRepo(args []string) error {
 	// Generate session IDs for agents
 	supervisorSessionID, err := claude.GenerateSessionID()
 	if err != nil {
-		return fmt.Errorf("failed to generate supervisor session ID: %w", err)
+		return errors.SessionIDGenerationFailed("supervisor", err)
 	}
 
 	var mergeQueueSessionID, prShepherdSessionID string
 	if mqEnabled {
 		mergeQueueSessionID, err = claude.GenerateSessionID()
 		if err != nil {
-			return fmt.Errorf("failed to generate merge-queue session ID: %w", err)
+			return errors.SessionIDGenerationFailed("merge-queue", err)
 		}
 	} else if psEnabled {
 		prShepherdSessionID, err = claude.GenerateSessionID()
 		if err != nil {
-			return fmt.Errorf("failed to generate pr-shepherd session ID: %w", err)
+			return errors.SessionIDGenerationFailed("pr-shepherd", err)
 		}
 	}
 
 	// Write prompt files
 	supervisorPromptFile, err := c.writePromptFile(repoPath, state.AgentTypeSupervisor, "supervisor")
 	if err != nil {
-		return fmt.Errorf("failed to write supervisor prompt: %w", err)
+		return errors.PromptWriteFailed("supervisor", err)
 	}
 
 	var mergeQueuePromptFile, prShepherdPromptFile string
 	if mqEnabled {
 		mergeQueuePromptFile, err = c.writeMergeQueuePromptFile(repoPath, "merge-queue", mqConfig)
 		if err != nil {
-			return fmt.Errorf("failed to write merge-queue prompt: %w", err)
+			return errors.PromptWriteFailed("merge-queue", err)
 		}
 	} else if psEnabled {
 		prShepherdPromptFile, err = c.writePRShepherdPromptFile(repoPath, "pr-shepherd", psConfig, forkConfig)
 		if err != nil {
-			return fmt.Errorf("failed to write pr-shepherd prompt: %w", err)
+			return errors.PromptWriteFailed("pr-shepherd", err)
 		}
 	}
 
@@ -1528,13 +1528,13 @@ func (c *CLI) initRepo(args []string) error {
 		// Resolve claude binary
 		claudeBinary, err := c.getClaudeBinary()
 		if err != nil {
-			return fmt.Errorf("failed to resolve claude binary: %w", err)
+			return errors.ClaudeNotFound(err)
 		}
 
 		fmt.Println("Starting Claude Code in supervisor window...")
 		pid, err := c.startClaudeInTmux(claudeBinary, tmuxSession, "supervisor", repoPath, supervisorSessionID, supervisorPromptFile, repoName, "")
 		if err != nil {
-			return fmt.Errorf("failed to start supervisor Claude: %w", err)
+			return errors.ClaudeStartFailed("supervisor", err)
 		}
 		supervisorPID = pid
 
@@ -1548,7 +1548,7 @@ func (c *CLI) initRepo(args []string) error {
 			fmt.Println("Starting Claude Code in merge-queue window...")
 			pid, err = c.startClaudeInTmux(claudeBinary, tmuxSession, "merge-queue", repoPath, mergeQueueSessionID, mergeQueuePromptFile, repoName, "")
 			if err != nil {
-				return fmt.Errorf("failed to start merge-queue Claude: %w", err)
+				return errors.ClaudeStartFailed("merge-queue", err)
 			}
 			mergeQueuePID = pid
 
@@ -1560,7 +1560,7 @@ func (c *CLI) initRepo(args []string) error {
 			fmt.Println("Starting Claude Code in pr-shepherd window...")
 			pid, err = c.startClaudeInTmux(claudeBinary, tmuxSession, "pr-shepherd", repoPath, prShepherdSessionID, prShepherdPromptFile, repoName, "")
 			if err != nil {
-				return fmt.Errorf("failed to start pr-shepherd Claude: %w", err)
+				return errors.ClaudeStartFailed("pr-shepherd", err)
 			}
 			prShepherdPID = pid
 
@@ -1592,10 +1592,10 @@ func (c *CLI) initRepo(args []string) error {
 		Args:    addRepoArgs,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to register repository with daemon: %w", err)
+		return errors.AgentRegistrationFailed("repository", err)
 	}
 	if !resp.Success {
-		return fmt.Errorf("failed to register repository: %s", resp.Error)
+		return errors.AgentRegistrationFailed("repository", fmt.Errorf("%s", resp.Error))
 	}
 
 	// Add supervisor agent
@@ -1612,10 +1612,10 @@ func (c *CLI) initRepo(args []string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to register supervisor: %w", err)
+		return errors.AgentRegistrationFailed("supervisor", err)
 	}
 	if !resp.Success {
-		return fmt.Errorf("failed to register supervisor: %s", resp.Error)
+		return errors.AgentRegistrationFailed("supervisor", fmt.Errorf("%s", resp.Error))
 	}
 
 	// Add merge-queue agent only if enabled (non-fork mode)
@@ -1633,10 +1633,10 @@ func (c *CLI) initRepo(args []string) error {
 			},
 		})
 		if err != nil {
-			return fmt.Errorf("failed to register merge-queue: %w", err)
+			return errors.AgentRegistrationFailed("merge-queue", err)
 		}
 		if !resp.Success {
-			return fmt.Errorf("failed to register merge-queue: %s", resp.Error)
+			return errors.AgentRegistrationFailed("merge-queue", fmt.Errorf("%s", resp.Error))
 		}
 	}
 
@@ -1655,10 +1655,10 @@ func (c *CLI) initRepo(args []string) error {
 			},
 		})
 		if err != nil {
-			return fmt.Errorf("failed to register pr-shepherd: %w", err)
+			return errors.AgentRegistrationFailed("pr-shepherd", err)
 		}
 		if !resp.Success {
-			return fmt.Errorf("failed to register pr-shepherd: %s", resp.Error)
+			return errors.AgentRegistrationFailed("pr-shepherd", fmt.Errorf("%s", resp.Error))
 		}
 	}
 
@@ -1673,9 +1673,9 @@ func (c *CLI) initRepo(args []string) error {
 		// Check if it's a conflict state that requires manual resolution
 		hasConflict, suggestion, checkErr := wt.CheckWorkspaceBranchConflict()
 		if checkErr == nil && hasConflict {
-			return fmt.Errorf("workspace branch conflict detected:\n%s", suggestion)
+			return errors.New(errors.CategoryConfig, fmt.Sprintf("workspace branch conflict detected:\n%s", suggestion))
 		}
-		return fmt.Errorf("failed to check workspace branch state: %w", err)
+		return errors.Wrap(errors.CategoryRuntime, "failed to check workspace branch state", err)
 	}
 	if migrated {
 		fmt.Println("Migrated legacy 'workspace' branch to 'workspace/default'")
@@ -1684,25 +1684,25 @@ func (c *CLI) initRepo(args []string) error {
 
 	fmt.Printf("Creating default workspace worktree at: %s\n", workspacePath)
 	if err := wt.CreateNewBranch(workspacePath, workspaceBranch, "HEAD"); err != nil {
-		return fmt.Errorf("failed to create default workspace worktree: %w", err)
+		return errors.WorktreeCreationFailed(err)
 	}
 
 	// Create default workspace tmux window (detached so it doesn't switch focus)
 	cmd = exec.Command("tmux", "new-window", "-d", "-t", tmuxSession, "-n", "default", "-c", workspacePath)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create workspace window: %w", err)
+		return errors.TmuxOperationFailed("create window", err)
 	}
 
 	// Generate session ID for workspace
 	workspaceSessionID, err := claude.GenerateSessionID()
 	if err != nil {
-		return fmt.Errorf("failed to generate workspace session ID: %w", err)
+		return errors.SessionIDGenerationFailed("workspace", err)
 	}
 
 	// Write prompt file for default workspace
 	workspacePromptFile, err := c.writePromptFile(repoPath, state.AgentTypeWorkspace, "default")
 	if err != nil {
-		return fmt.Errorf("failed to write default workspace prompt: %w", err)
+		return errors.PromptWriteFailed("workspace", err)
 	}
 
 	// Copy hooks configuration if it exists
@@ -1716,13 +1716,13 @@ func (c *CLI) initRepo(args []string) error {
 		// Resolve claude binary
 		claudeBinary, err := c.getClaudeBinary()
 		if err != nil {
-			return fmt.Errorf("failed to resolve claude binary: %w", err)
+			return errors.ClaudeNotFound(err)
 		}
 
 		fmt.Println("Starting Claude Code in default workspace window...")
 		pid, err := c.startClaudeInTmux(claudeBinary, tmuxSession, "default", workspacePath, workspaceSessionID, workspacePromptFile, repoName, "")
 		if err != nil {
-			return fmt.Errorf("failed to start default workspace Claude: %w", err)
+			return errors.ClaudeStartFailed("default workspace", err)
 		}
 		workspacePID = pid
 
@@ -1746,10 +1746,10 @@ func (c *CLI) initRepo(args []string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to register default workspace: %w", err)
+		return errors.AgentRegistrationFailed("default workspace", err)
 	}
 	if !resp.Success {
-		return fmt.Errorf("failed to register default workspace: %s", resp.Error)
+		return errors.AgentRegistrationFailed("default workspace", fmt.Errorf("%s", resp.Error))
 	}
 
 	fmt.Println()
@@ -2375,7 +2375,7 @@ func (c *CLI) createWorker(args []string) error {
 	// Generate session ID for worker
 	workerSessionID, err := claude.GenerateSessionID()
 	if err != nil {
-		return fmt.Errorf("failed to generate worker session ID: %w", err)
+		return errors.SessionIDGenerationFailed("worker", err)
 	}
 
 	// Get fork config from daemon to include in worker prompt
@@ -2406,7 +2406,7 @@ func (c *CLI) createWorker(args []string) error {
 	}
 	workerPromptFile, err := c.writeWorkerPromptFile(repoPath, workerName, workerConfig)
 	if err != nil {
-		return fmt.Errorf("failed to write worker prompt: %w", err)
+		return errors.PromptWriteFailed("worker", err)
 	}
 
 	// Copy hooks configuration if it exists
@@ -2420,14 +2420,14 @@ func (c *CLI) createWorker(args []string) error {
 		// Resolve claude binary
 		claudeBinary, err := c.getClaudeBinary()
 		if err != nil {
-			return fmt.Errorf("failed to resolve claude binary: %w", err)
+			return errors.ClaudeNotFound(err)
 		}
 
 		fmt.Println("Starting Claude Code in worker window...")
 		initialMessage := fmt.Sprintf("Task: %s", task)
 		pid, err := c.startClaudeInTmux(claudeBinary, tmuxSession, workerName, wtPath, workerSessionID, workerPromptFile, repoName, initialMessage)
 		if err != nil {
-			return fmt.Errorf("failed to start worker Claude: %w", err)
+			return errors.ClaudeStartFailed("worker", err)
 		}
 		workerPID = pid
 
@@ -2452,10 +2452,10 @@ func (c *CLI) createWorker(args []string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to register worker: %w", err)
+		return errors.AgentRegistrationFailed("worker", err)
 	}
 	if !resp.Success {
-		return fmt.Errorf("failed to register worker: %s", resp.Error)
+		return errors.AgentRegistrationFailed("worker", fmt.Errorf("%s", resp.Error))
 	}
 
 	fmt.Println()
@@ -3448,7 +3448,7 @@ func (c *CLI) addWorkspace(args []string) error {
 			agentType, _ := agentMap["type"].(string)
 			name, _ := agentMap["name"].(string)
 			if agentType == "workspace" && name == workspaceName {
-				return fmt.Errorf("workspace '%s' already exists in repo '%s'", workspaceName, repoName)
+				return errors.WorkspaceAlreadyExists(workspaceName, repoName)
 			}
 		}
 	}
@@ -3467,7 +3467,7 @@ func (c *CLI) addWorkspace(args []string) error {
 		fmt.Printf("This may be from a previous incomplete workspace creation.\n")
 		fmt.Printf("Auto-repairing: removing existing worktree...\n")
 		if err := wt.Remove(wtPath, true); err != nil {
-			return fmt.Errorf("failed to clean up existing worktree: %w\nPlease manually remove it with: git worktree remove %s", err, wtPath)
+			return errors.WorktreeCleanupNeeded(wtPath, err)
 		}
 		fmt.Println("✓ Cleaned up stale worktree")
 	}
@@ -3487,7 +3487,7 @@ func (c *CLI) addWorkspace(args []string) error {
 		fmt.Printf("This may be from a previous incomplete workspace creation.\n")
 		fmt.Printf("Auto-repairing: killing existing tmux window...\n")
 		if err := tmuxClient.KillWindow(context.Background(), tmuxSession, workspaceName); err != nil {
-			return fmt.Errorf("failed to clean up existing tmux window: %w\nPlease manually kill it with: tmux kill-window -t %s:%s", err, tmuxSession, workspaceName)
+			return errors.TmuxWindowCleanupNeeded(tmuxSession, workspaceName, err)
 		}
 		fmt.Println("✓ Cleaned up stale tmux window")
 	}
@@ -3502,13 +3502,13 @@ func (c *CLI) addWorkspace(args []string) error {
 	// Generate session ID for workspace
 	workspaceSessionID, err := claude.GenerateSessionID()
 	if err != nil {
-		return fmt.Errorf("failed to generate workspace session ID: %w", err)
+		return errors.SessionIDGenerationFailed("workspace", err)
 	}
 
 	// Write prompt file for workspace
 	workspacePromptFile, err := c.writePromptFile(repoPath, state.AgentTypeWorkspace, workspaceName)
 	if err != nil {
-		return fmt.Errorf("failed to write workspace prompt: %w", err)
+		return errors.PromptWriteFailed("workspace", err)
 	}
 
 	// Copy hooks configuration if it exists
@@ -3522,13 +3522,13 @@ func (c *CLI) addWorkspace(args []string) error {
 		// Resolve claude binary
 		claudeBinary, err := c.getClaudeBinary()
 		if err != nil {
-			return fmt.Errorf("failed to resolve claude binary: %w", err)
+			return errors.ClaudeNotFound(err)
 		}
 
 		fmt.Println("Starting Claude Code in workspace window...")
 		pid, err := c.startClaudeInTmux(claudeBinary, tmuxSession, workspaceName, wtPath, workspaceSessionID, workspacePromptFile, repoName, "")
 		if err != nil {
-			return fmt.Errorf("failed to start workspace Claude: %w", err)
+			return errors.ClaudeStartFailed("workspace", err)
 		}
 		workspacePID = pid
 
@@ -3552,10 +3552,10 @@ func (c *CLI) addWorkspace(args []string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to register workspace: %w", err)
+		return errors.AgentRegistrationFailed("workspace", err)
 	}
 	if !resp.Success {
-		return fmt.Errorf("failed to register workspace: %s", resp.Error)
+		return errors.AgentRegistrationFailed("workspace", fmt.Errorf("%s", resp.Error))
 	}
 
 	fmt.Println()
@@ -3864,7 +3864,7 @@ func (c *CLI) connectWorkspace(args []string) error {
 // validateWorkspaceName validates that a workspace name follows branch name restrictions
 func validateWorkspaceName(name string) error {
 	if name == "" {
-		return fmt.Errorf("workspace name cannot be empty")
+		return errors.InvalidWorkspaceName(name, "cannot be empty")
 	}
 
 	// Git branch name restrictions
@@ -3875,25 +3875,25 @@ func validateWorkspaceName(name string) error {
 	// - Cannot be "." or ".."
 
 	if name == "." || name == ".." {
-		return fmt.Errorf("workspace name cannot be '.' or '..'")
+		return errors.InvalidWorkspaceName(name, "cannot be '.' or '..'")
 	}
 
 	if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "-") {
-		return fmt.Errorf("workspace name cannot start with '.' or '-'")
+		return errors.InvalidWorkspaceName(name, "cannot start with '.' or '-'")
 	}
 
 	if strings.HasSuffix(name, ".") || strings.HasSuffix(name, "/") {
-		return fmt.Errorf("workspace name cannot end with '.' or '/'")
+		return errors.InvalidWorkspaceName(name, "cannot end with '.' or '/'")
 	}
 
 	if strings.Contains(name, "..") {
-		return fmt.Errorf("workspace name cannot contain '..'")
+		return errors.InvalidWorkspaceName(name, "cannot contain '..'")
 	}
 
 	invalidChars := []string{"\\", "~", "^", ":", "?", "*", "[", "@", "{", "}", " ", "\t", "\n"}
 	for _, char := range invalidChars {
 		if strings.Contains(name, char) {
-			return fmt.Errorf("workspace name cannot contain '%s'", char)
+			return errors.InvalidWorkspaceName(name, fmt.Sprintf("cannot contain '%s'", char))
 		}
 	}
 
@@ -4217,7 +4217,7 @@ func (c *CLI) resolveRepo(flags map[string]string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("could not determine repository; use --repo flag or run 'multiclaude repo use <name>'")
+	return "", errors.NoDefaultRepo()
 }
 
 // inferAgentContext infers the current agent and repo from working directory
@@ -4537,19 +4537,19 @@ func (c *CLI) reviewPR(args []string) error {
 	fmt.Printf("Creating tmux window: %s\n", reviewerName)
 	cmd = exec.Command("tmux", "new-window", "-d", "-t", tmuxSession, "-n", reviewerName, "-c", wtPath)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create tmux window: %w", err)
+		return errors.TmuxOperationFailed("create window", err)
 	}
 
 	// Generate session ID for reviewer
 	reviewerSessionID, err := claude.GenerateSessionID()
 	if err != nil {
-		return fmt.Errorf("failed to generate reviewer session ID: %w", err)
+		return errors.SessionIDGenerationFailed("reviewer", err)
 	}
 
 	// Write prompt file for reviewer
 	reviewerPromptFile, err := c.writePromptFile(repoPath, state.AgentTypeReview, reviewerName)
 	if err != nil {
-		return fmt.Errorf("failed to write reviewer prompt: %w", err)
+		return errors.PromptWriteFailed("reviewer", err)
 	}
 
 	// Copy hooks configuration if it exists
@@ -4563,14 +4563,14 @@ func (c *CLI) reviewPR(args []string) error {
 		// Resolve claude binary
 		claudeBinary, err := c.getClaudeBinary()
 		if err != nil {
-			return fmt.Errorf("failed to resolve claude binary: %w", err)
+			return errors.ClaudeNotFound(err)
 		}
 
 		fmt.Println("Starting Claude Code in reviewer window...")
 		initialMessage := fmt.Sprintf("Review PR #%s: https://github.com/%s/%s/pull/%s", prNumber, parts[1], parts[2], prNumber)
 		pid, err := c.startClaudeInTmux(claudeBinary, tmuxSession, reviewerName, wtPath, reviewerSessionID, reviewerPromptFile, repoName, initialMessage)
 		if err != nil {
-			return fmt.Errorf("failed to start reviewer Claude: %w", err)
+			return errors.ClaudeStartFailed("reviewer", err)
 		}
 		reviewerPID = pid
 
@@ -4596,10 +4596,10 @@ func (c *CLI) reviewPR(args []string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to register reviewer: %w", err)
+		return errors.AgentRegistrationFailed("reviewer", err)
 	}
 	if !resp.Success {
-		return fmt.Errorf("failed to register reviewer: %s", resp.Error)
+		return errors.AgentRegistrationFailed("reviewer", fmt.Errorf("%s", resp.Error))
 	}
 
 	fmt.Println()
@@ -4649,7 +4649,7 @@ func (c *CLI) viewLogs(args []string) error {
 	} else if _, err := os.Stat(systemLogFile); err == nil {
 		logFile = systemLogFile
 	} else {
-		return fmt.Errorf("no log file found for agent %s in repo %s", agentName, repoName)
+		return errors.LogFileNotFound(agentName, repoName)
 	}
 
 	// Check for --follow flag
@@ -4817,13 +4817,13 @@ func (c *CLI) cleanLogs(args []string) error {
 
 	olderThan, ok := flags["older-than"]
 	if !ok {
-		return fmt.Errorf("usage: multiclaude logs clean --older-than <duration> (e.g., 7d, 24h)")
+		return errors.InvalidUsage("usage: multiclaude logs clean --older-than <duration> (e.g., 7d, 24h)")
 	}
 
 	// Parse duration
 	duration, err := parseDuration(olderThan)
 	if err != nil {
-		return fmt.Errorf("invalid duration: %v", err)
+		return errors.InvalidDuration(olderThan)
 	}
 
 	cutoff := time.Now().Add(-duration)
