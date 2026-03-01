@@ -31,3 +31,7 @@ Thumbs.db
 # multiclaude runtime (but allow config files)
 .multiclaude/*
 !.multiclaude/*.md
+.claude/
+.go-cache/
+.claude/
+.go-cache/
