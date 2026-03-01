@@ -1318,25 +1318,71 @@ func (d *Daemon) ensureCoreAgents(repoName string) (int, error) {
 	return created, nil
 }
 
-// spawnCoreAgent spawns a core agent (supervisor, merge-queue, or pr-shepherd)
+// spawnCoreAgent creates a new core agent from scratch (supervisor, merge-queue, or pr-shepherd).
+// Unlike handleRestartAgent which requires the agent to already exist in state,
+// this creates the tmux window, writes the prompt, starts Claude, and registers in state.
 func (d *Daemon) spawnCoreAgent(repoName, agentName string, agentType state.AgentType) error {
-	// This delegates to the existing spawnAgent logic used by the restart mechanism
-	// We'll use the socket handler internally
-	args := map[string]interface{}{
-		"repo":  repoName,
-		"agent": agentName,
-		"class": string(agentType),
+	repo, exists := d.state.GetRepo(repoName)
+	if !exists {
+		return fmt.Errorf("repository %s not found in state", repoName)
 	}
 
-	resp := d.handleRestartAgent(socket.Request{
-		Command: "restart_agent",
-		Args:    args,
-	})
+	repoPath := d.paths.RepoDir(repoName)
 
-	if !resp.Success {
-		return fmt.Errorf("failed to spawn agent: %s", resp.Error)
+	// Create tmux window (core agents run from repo dir, not a worktree)
+	hasWindow, _ := d.tmux.HasWindow(d.ctx, repo.TmuxSession, agentName)
+	if !hasWindow {
+		cmd := exec.Command("tmux", "new-window", "-d", "-t", repo.TmuxSession, "-n", agentName, "-c", repoPath)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to create tmux window: %w", err)
+		}
 	}
 
+	// Generate session ID
+	sessionID, err := claude.GenerateSessionID()
+	if err != nil {
+		return fmt.Errorf("failed to generate session ID: %w", err)
+	}
+
+	// Write prompt file
+	promptFile, err := d.writePromptFile(repoName, agentType, agentName)
+	if err != nil {
+		return fmt.Errorf("failed to write prompt file: %w", err)
+	}
+
+	// Copy hooks configuration
+	if err := hooks.CopyConfig(repoPath, repoPath); err != nil {
+		d.logger.Warn("Failed to copy hooks config for %s: %v", agentName, err)
+	}
+
+	// Start Claude (skip in test mode)
+	var pid int
+	if os.Getenv("MULTICLAUDE_TEST_MODE") != "1" {
+		result, err := d.claudeRunner.Start(d.ctx, repo.TmuxSession, agentName, claude.Config{
+			SessionID:        sessionID,
+			Resume:           false,
+			SystemPromptFile: promptFile,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to start Claude: %w", err)
+		}
+		pid = result.PID
+	}
+
+	// Register agent in state
+	agent := state.Agent{
+		Type:         agentType,
+		WorktreePath: repoPath,
+		TmuxWindow:   agentName,
+		SessionID:    sessionID,
+		PID:          pid,
+	}
+
+	if err := d.state.AddAgent(repoName, agentName, agent); err != nil {
+		return fmt.Errorf("failed to add agent to state: %w", err)
+	}
+
+	d.logger.Info("Created core agent %s (%s) for %s with PID %d", agentName, agentType, repoName, pid)
 	return nil
 }
 

@@ -4072,32 +4072,31 @@ func TestSpawnCoreAgentErrorIncludesDetails(t *testing.T) {
 	d, cleanup := setupTestDaemon(t)
 	defer cleanup()
 
-	// Add repo but don't add the agent — handleRestartAgent will fail
-	// because the agent doesn't exist in state.
+	// spawnCoreAgent with a repo not in state should fail
+	err := d.spawnCoreAgent("nonexistent-repo", "supervisor", state.AgentTypeSupervisor)
+	if err == nil {
+		t.Fatal("Expected error from spawnCoreAgent for missing repo, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found in state") {
+		t.Errorf("Error should mention 'not found in state', got: %s", err.Error())
+	}
+
+	// spawnCoreAgent with a valid repo but no tmux should fail at window creation
 	repo := &state.Repository{
 		GithubURL:   "https://github.com/test/repo",
-		TmuxSession: "mc-test-spawn",
+		TmuxSession: "mc-test-spawn-nonexistent",
 		Agents:      make(map[string]state.Agent),
 	}
 	if err := d.state.AddRepo("test-repo", repo); err != nil {
 		t.Fatalf("Failed to add repo: %v", err)
 	}
 
-	err := d.spawnCoreAgent("test-repo", "supervisor", state.AgentTypeSupervisor)
+	err = d.spawnCoreAgent("test-repo", "supervisor", state.AgentTypeSupervisor)
 	if err == nil {
-		t.Fatal("Expected error from spawnCoreAgent, got nil")
+		t.Fatal("Expected error from spawnCoreAgent without tmux, got nil")
 	}
-
-	// The error should wrap the resp.Error from handleRestartAgent.
-	// handleRestartAgent returns "agent 'supervisor' not found..." when agent not in state.
 	errMsg := err.Error()
-	if !strings.Contains(errMsg, "failed to spawn agent") {
-		t.Errorf("Error should contain 'failed to spawn agent', got: %s", errMsg)
-	}
-	if !strings.Contains(errMsg, "supervisor") {
-		t.Errorf("Error should reference agent name 'supervisor', got: %s", errMsg)
-	}
-	if !strings.Contains(errMsg, "not found") {
-		t.Errorf("Error should contain 'not found' from handleRestartAgent resp.Error, got: %s", errMsg)
+	if !strings.Contains(errMsg, "failed to create tmux window") {
+		t.Errorf("Error should mention tmux window creation failure, got: %s", errMsg)
 	}
 }
