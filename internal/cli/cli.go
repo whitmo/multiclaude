@@ -5551,7 +5551,10 @@ func (c *CLI) restartClaude(args []string) error {
 	// Add common flags
 	cmdArgs = append(cmdArgs, "--dangerously-skip-permissions")
 	if _, err := os.Stat(promptFile); err == nil {
-		cmdArgs = append(cmdArgs, "--append-system-prompt-file", promptFile)
+		promptContent, readErr := os.ReadFile(promptFile)
+		if readErr == nil {
+			cmdArgs = append(cmdArgs, "--append-system-prompt", string(promptContent))
+		}
 	}
 
 	// Exec claude
@@ -5874,7 +5877,7 @@ func (c *CLI) startClaudeInTmux(binaryPath, tmuxSession, tmuxWindow, workDir, se
 
 	// Add prompt file if provided
 	if promptFile != "" {
-		claudeCmd += fmt.Sprintf(" --append-system-prompt-file %s", promptFile)
+		claudeCmd += fmt.Sprintf(` --append-system-prompt "$(cat '%s')"`, promptFile)
 	}
 
 	// Send command to tmux window

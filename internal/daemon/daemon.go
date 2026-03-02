@@ -2060,7 +2060,7 @@ func (d *Daemon) startAgentWithConfig(repoName string, repo *state.Repository, c
 		}
 
 		// Build CLI command
-		claudeCmd := fmt.Sprintf("%s --session-id %s --dangerously-skip-permissions --append-system-prompt-file %s",
+		claudeCmd := fmt.Sprintf(`%s --session-id %s --dangerously-skip-permissions --append-system-prompt "$(cat '%s')"`,
 			binaryPath, sessionID, cfg.promptFile)
 
 		// Send command to tmux window

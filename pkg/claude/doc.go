@@ -3,7 +3,7 @@
 // This package abstracts the details of launching and interacting with Claude Code
 // instances running in terminal emulators. It handles:
 //
-//   - CLI flag construction (--session-id, --dangerously-skip-permissions, --append-system-prompt-file)
+//   - CLI flag construction (--session-id, --dangerously-skip-permissions, --append-system-prompt)
 //   - Session ID generation (UUID v4)
 //   - Startup timing quirks
 //   - Terminal integration via the [TerminalRunner] interface

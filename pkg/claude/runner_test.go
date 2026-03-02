@@ -173,8 +173,8 @@ func TestStart(t *testing.T) {
 	if !strings.Contains(call.text, "--dangerously-skip-permissions") {
 		t.Errorf("expected command to contain --dangerously-skip-permissions, got %q", call.text)
 	}
-	if !strings.Contains(call.text, "--append-system-prompt-file /path/to/prompt.md") {
-		t.Errorf("expected command to contain prompt file, got %q", call.text)
+	if !strings.Contains(call.text, `--append-system-prompt "$(cat '/path/to/prompt.md')"`) {
+		t.Errorf("expected command to contain prompt via cat, got %q", call.text)
 	}
 }
 
@@ -491,7 +491,7 @@ func TestBuildCommand(t *testing.T) {
 				SystemPromptFile: "/path/to/prompt.md",
 			},
 			contains: []string{
-				"--append-system-prompt-file /path/to/prompt.md",
+				`--append-system-prompt "$(cat '/path/to/prompt.md')"`,
 			},
 		},
 		{

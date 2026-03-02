@@ -188,7 +188,7 @@ type Config struct {
 	WorkDir string
 
 	// SystemPromptFile is the path to a file containing the system prompt.
-	// This is passed via --append-system-prompt-file.
+	// The file contents are read and passed inline via --append-system-prompt.
 	SystemPromptFile string
 
 	// InitialMessage is an optional message to send to Claude after startup.
@@ -315,9 +315,9 @@ func (r *Runner) buildCommand(sessionID string, cfg Config) string {
 		cmd += " --dangerously-skip-permissions"
 	}
 
-	// Add system prompt file
+	// Add system prompt (read file contents via shell expansion)
 	if cfg.SystemPromptFile != "" {
-		cmd += fmt.Sprintf(" --append-system-prompt-file %s", cfg.SystemPromptFile)
+		cmd += fmt.Sprintf(` --append-system-prompt "$(cat '%s')"`, cfg.SystemPromptFile)
 	}
 
 	return cmd

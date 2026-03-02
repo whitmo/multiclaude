@@ -205,7 +205,7 @@ The runner constructs Claude commands with these flags:
 | `--session-id <uuid>` | Unique session identifier |
 | `--resume <uuid>` | Resume existing session |
 | `--dangerously-skip-permissions` | Skip interactive permission prompts |
-| `--append-system-prompt-file <path>` | Path to system prompt file |
+| `--append-system-prompt <text>` | System prompt content (read from file via shell expansion) |
 
 ## Prompt Building
 
