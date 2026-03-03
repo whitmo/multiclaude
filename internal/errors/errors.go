@@ -391,3 +391,69 @@ func WorkspaceNotFound(name, repo string) *CLIError {
 		Suggestion: fmt.Sprintf("multiclaude workspace list --repo %s", repo),
 	}
 }
+
+// ClaudeStartupFailed creates an error for when Claude fails to start for an agent
+func ClaudeStartupFailed(agentType string, cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("failed to start Claude for %s", agentType),
+		Cause:      cause,
+		Suggestion: "check that 'claude' is installed and in PATH, then try: multiclaude daemon status",
+	}
+}
+
+// DaemonAlreadyRunning creates an error for when the daemon is already running
+func DaemonAlreadyRunning(pid int) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("daemon already running (PID: %d)", pid),
+		Suggestion: "multiclaude daemon stop && multiclaude daemon start",
+	}
+}
+
+// AgentRestartFailed creates an error for when an agent fails to restart
+func AgentRestartFailed(agentName string, cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("failed to restart agent '%s'", agentName),
+		Cause:      cause,
+		Suggestion: "check daemon logs: tail -f ~/.multiclaude/daemon.log",
+	}
+}
+
+// PromptWriteFailed creates an error for when writing an agent prompt file fails
+func PromptWriteFailed(agentType string, cause error) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("failed to write %s prompt file", agentType),
+		Cause:      cause,
+		Suggestion: "check disk space and file permissions in ~/.multiclaude/prompts/",
+	}
+}
+
+// LogFileNotFound creates an error for when an agent's log file is not found
+func LogFileNotFound(agentName, repo string) *CLIError {
+	return &CLIError{
+		Category:   CategoryNotFound,
+		Message:    fmt.Sprintf("no log file found for agent '%s' in repository '%s'", agentName, repo),
+		Suggestion: fmt.Sprintf("multiclaude worker list --repo %s", repo),
+	}
+}
+
+// WorkspaceAlreadyExists creates an error for when a workspace already exists
+func WorkspaceAlreadyExists(name, repo string) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("workspace '%s' already exists in repository '%s'", name, repo),
+		Suggestion: fmt.Sprintf("multiclaude workspace list --repo %s", repo),
+	}
+}
+
+// RepoAlreadyInitialized creates an error for when a repository is already initialized
+func RepoAlreadyInitialized(name string) *CLIError {
+	return &CLIError{
+		Category:   CategoryRuntime,
+		Message:    fmt.Sprintf("repository '%s' is already initialized", name),
+		Suggestion: fmt.Sprintf("multiclaude repo rm %s", name),
+	}
+}

@@ -1125,15 +1125,15 @@ func (d *Daemon) handleRestartAgent(req socket.Request) socket.Response {
 	// Check if tmux window exists
 	repo, exists := d.state.GetRepo(repoName)
 	if !exists {
-		return socket.ErrorResponse("repository '%s' not found in state", repoName)
+		return socket.ErrorResponse("repository '%s' not found - check tracked repos with: multiclaude repo list", repoName)
 	}
 
 	hasWindow, err := d.tmux.HasWindow(d.ctx, repo.TmuxSession, agentName)
 	if err != nil {
-		return socket.ErrorResponse("failed to check tmux window: %v", err)
+		return socket.ErrorResponse("failed to check tmux window for '%s': %v - try: multiclaude daemon status", agentName, err)
 	}
 	if !hasWindow {
-		return socket.ErrorResponse("tmux window '%s' does not exist - the agent may need to be recreated", agentName)
+		return socket.ErrorResponse("tmux window '%s' does not exist - recreate the agent or run: multiclaude cleanup", agentName)
 	}
 
 	// Check if agent is already running
@@ -1146,7 +1146,7 @@ func (d *Daemon) handleRestartAgent(req socket.Request) socket.Response {
 
 	// Restart the agent
 	if err := d.restartAgent(repoName, agentName, agent, repo); err != nil {
-		return socket.ErrorResponse("failed to restart agent: %v", err)
+		return socket.ErrorResponse("failed to restart agent '%s': %v - check logs: tail -f ~/.multiclaude/daemon.log", agentName, err)
 	}
 
 	// Get updated PID from state
@@ -1262,7 +1262,7 @@ func (d *Daemon) handleGetRepoConfig(req socket.Request) socket.Response {
 
 	repo, exists := d.state.GetRepo(name)
 	if !exists {
-		return socket.ErrorResponse("repository %q not found", name)
+		return socket.ErrorResponse("repository %q not found - check tracked repos with: multiclaude repo list", name)
 	}
 
 	// Get merge queue config (use default if not set for backward compatibility)
@@ -1564,12 +1564,12 @@ func (d *Daemon) handleSpawnAgent(req socket.Request) socket.Response {
 	// Get repository
 	repo, exists := d.state.GetRepo(repoName)
 	if !exists {
-		return socket.ErrorResponse("repository %q not found", repoName)
+		return socket.ErrorResponse("repository %q not found - check tracked repos with: multiclaude repo list", repoName)
 	}
 
 	// Check if agent already exists
 	if _, exists := d.state.GetAgent(repoName, agentName); exists {
-		return socket.ErrorResponse("agent %q already exists in repository %q", agentName, repoName)
+		return socket.ErrorResponse("agent %q already exists in repository %q - try: multiclaude cleanup", agentName, repoName)
 	}
 
 	// Determine agent type based on class
@@ -1607,7 +1607,7 @@ func (d *Daemon) handleSpawnAgent(req socket.Request) socket.Response {
 		// Ephemeral agents get their own worktree with a new branch
 		branchName := fmt.Sprintf("work/%s", agentName)
 		if err := wt.CreateNewBranch(worktreePath, branchName, "HEAD"); err != nil {
-			return socket.ErrorResponse("failed to create worktree: %v", err)
+			return socket.ErrorResponse("failed to create worktree for '%s': %v - try: multiclaude cleanup", agentName, err)
 		}
 	}
 
@@ -1618,18 +1618,18 @@ func (d *Daemon) handleSpawnAgent(req socket.Request) socket.Response {
 		if agentClass != "persistent" {
 			wt.Remove(worktreePath, true)
 		}
-		return socket.ErrorResponse("failed to create tmux window: %v", err)
+		return socket.ErrorResponse("failed to create tmux window for '%s': %v - check tmux session with: tmux ls", agentName, err)
 	}
 
 	// Write prompt to file
 	promptDir := filepath.Join(d.paths.Root, "prompts")
 	if err := os.MkdirAll(promptDir, 0755); err != nil {
-		return socket.ErrorResponse("failed to create prompt directory: %v", err)
+		return socket.ErrorResponse("failed to create prompt directory: %v - check disk space and permissions in ~/.multiclaude/", err)
 	}
 
 	promptPath := filepath.Join(promptDir, fmt.Sprintf("%s.md", agentName))
 	if err := os.WriteFile(promptPath, []byte(promptText), 0644); err != nil {
-		return socket.ErrorResponse("failed to write prompt file: %v", err)
+		return socket.ErrorResponse("failed to write prompt file for '%s': %v - check disk space and permissions", agentName, err)
 	}
 
 	// Copy hooks config
@@ -1651,7 +1651,7 @@ func (d *Daemon) handleSpawnAgent(req socket.Request) socket.Response {
 		if agentClass != "persistent" {
 			wt.Remove(worktreePath, true)
 		}
-		return socket.ErrorResponse("failed to start agent: %v", err)
+		return socket.ErrorResponse("failed to start agent '%s': %v - check that 'claude' is in PATH and daemon logs: tail -f ~/.multiclaude/daemon.log", agentName, err)
 	}
 
 	// Update task if provided
@@ -1819,7 +1819,7 @@ func (d *Daemon) restoreRepoAgents(repoName string, repo *state.Repository) erro
 
 	// Verify the repo still exists on disk
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
-		return fmt.Errorf("repository path does not exist: %s", repoPath)
+		return fmt.Errorf("repository path does not exist: %s - try: multiclaude repo rm %s && multiclaude repo init <url>", repoPath, repoName)
 	}
 
 	// Clear any stale agents from state (their tmux session is gone)
@@ -2022,7 +2022,7 @@ func (d *Daemon) sendAgentDefinitionsToSupervisor(repoName, repoPath string, mqC
 func (d *Daemon) getClaudeBinaryPath() (string, error) {
 	binaryPath, err := exec.LookPath("claude")
 	if err != nil {
-		return "", fmt.Errorf("claude binary not found in PATH: %w", err)
+		return "", fmt.Errorf("claude binary not found in PATH: %w - install Claude Code CLI: https://docs.anthropic.com/claude-code", err)
 	}
 	return binaryPath, nil
 }
@@ -2248,7 +2248,7 @@ func RunDetached() error {
 	// Check if already running
 	pidFile := NewPIDFile(paths.DaemonPID)
 	if running, pid, _ := pidFile.IsRunning(); running {
-		return fmt.Errorf("daemon already running (PID: %d)", pid)
+		return fmt.Errorf("daemon already running (PID: %d) - try: multiclaude daemon stop && multiclaude daemon start", pid)
 	}
 
 	// Ensure config directory exists

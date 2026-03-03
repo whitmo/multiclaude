@@ -556,6 +556,130 @@ func TestNoAgentsFound(t *testing.T) {
 	}
 }
 
+func TestClaudeStartupFailed(t *testing.T) {
+	cause := errors.New("connection refused")
+	err := ClaudeStartupFailed("supervisor", cause)
+
+	if err.Category != CategoryRuntime {
+		t.Errorf("expected CategoryRuntime, got %v", err.Category)
+	}
+	if err.Cause != cause {
+		t.Error("should wrap cause")
+	}
+	if err.Suggestion == "" {
+		t.Error("should have a suggestion")
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "supervisor") {
+		t.Errorf("expected agent type in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "claude") {
+		t.Errorf("expected claude in suggestion, got: %s", formatted)
+	}
+}
+
+func TestDaemonAlreadyRunning(t *testing.T) {
+	err := DaemonAlreadyRunning(12345)
+
+	if err.Category != CategoryRuntime {
+		t.Errorf("expected CategoryRuntime, got %v", err.Category)
+	}
+	if err.Suggestion == "" {
+		t.Error("should have a suggestion")
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "12345") {
+		t.Errorf("expected PID in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "daemon stop") {
+		t.Errorf("expected stop suggestion, got: %s", formatted)
+	}
+}
+
+func TestAgentRestartFailed(t *testing.T) {
+	cause := errors.New("tmux error")
+	err := AgentRestartFailed("my-worker", cause)
+
+	if err.Category != CategoryRuntime {
+		t.Errorf("expected CategoryRuntime, got %v", err.Category)
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "my-worker") {
+		t.Errorf("expected agent name in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "daemon.log") {
+		t.Errorf("expected log suggestion, got: %s", formatted)
+	}
+}
+
+func TestPromptWriteFailed(t *testing.T) {
+	cause := errors.New("permission denied")
+	err := PromptWriteFailed("worker", cause)
+
+	if err.Category != CategoryRuntime {
+		t.Errorf("expected CategoryRuntime, got %v", err.Category)
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "worker") {
+		t.Errorf("expected agent type in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "disk space") {
+		t.Errorf("expected disk space suggestion, got: %s", formatted)
+	}
+}
+
+func TestLogFileNotFound(t *testing.T) {
+	err := LogFileNotFound("my-agent", "my-repo")
+
+	if err.Category != CategoryNotFound {
+		t.Errorf("expected CategoryNotFound, got %v", err.Category)
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "my-agent") {
+		t.Errorf("expected agent name in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "my-repo") {
+		t.Errorf("expected repo name in message, got: %s", formatted)
+	}
+}
+
+func TestWorkspaceAlreadyExists(t *testing.T) {
+	err := WorkspaceAlreadyExists("dev", "my-repo")
+
+	if err.Category != CategoryRuntime {
+		t.Errorf("expected CategoryRuntime, got %v", err.Category)
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "dev") {
+		t.Errorf("expected workspace name in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "workspace list") {
+		t.Errorf("expected list suggestion, got: %s", formatted)
+	}
+}
+
+func TestRepoAlreadyInitialized(t *testing.T) {
+	err := RepoAlreadyInitialized("my-repo")
+
+	if err.Category != CategoryRuntime {
+		t.Errorf("expected CategoryRuntime, got %v", err.Category)
+	}
+
+	formatted := Format(err)
+	if !strings.Contains(formatted, "my-repo") {
+		t.Errorf("expected repo name in message, got: %s", formatted)
+	}
+	if !strings.Contains(formatted, "repo rm") {
+		t.Errorf("expected repo rm suggestion, got: %s", formatted)
+	}
+}
+
 func TestWorkspaceNotFound(t *testing.T) {
 	err := WorkspaceNotFound("my-workspace", "my-repo")
 
