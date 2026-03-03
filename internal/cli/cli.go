@@ -565,7 +565,7 @@ func (c *CLI) registerCommands() {
 	agentCmd.Subcommands["complete"] = &Command{
 		Name:        "complete",
 		Description: "Signal worker completion",
-		Usage:       "multiclaude agent complete [--summary <text>] [--failure <reason>]",
+		Usage:       "multiclaude agent complete [--summary <text>] [--failure <reason>] [--pr-url <url>]",
 		Run:         c.completeWorker,
 	}
 
@@ -2702,9 +2702,11 @@ func (c *CLI) showHistory(args []string) error {
 		// Try to get PR status from GitHub if we have a branch
 		prStatus, prLink := c.getPRStatusForBranch(repoPath, branch, prURL)
 
-		// Use stored status if it indicates failure
+		// Use stored status if it indicates failure or a terminal state
 		if storedStatus == "failed" {
 			prStatus = "failed"
+		} else if storedStatus == "merged" || storedStatus == "closed" {
+			prStatus = storedStatus
 		}
 
 		// Apply status filter
@@ -2814,12 +2816,34 @@ func (c *CLI) showHistory(args []string) error {
 
 // getPRStatusForBranch queries GitHub for the PR status of a branch
 func (c *CLI) getPRStatusForBranch(repoPath, branch, existingPRURL string) (status, prLink string) {
-	// If we already have a PR URL, just return it formatted
+	// If we already have a PR URL, query its status directly
 	if existingPRURL != "" {
-		// Extract PR number from URL for shorter display
-		parts := strings.Split(existingPRURL, "/")
-		if len(parts) > 0 {
-			prNum := parts[len(parts)-1]
+		// Extract PR number from URL
+		parts := strings.Split(strings.TrimRight(existingPRURL, "/"), "/")
+		prNum := ""
+		if len(parts) >= 2 && parts[len(parts)-2] == "pull" {
+			prNum = parts[len(parts)-1]
+		}
+
+		// Try to get live status from GitHub
+		if prNum != "" {
+			cmd := exec.Command("gh", "pr", "view", prNum, "--json", "state")
+			cmd.Dir = repoPath
+			if output, err := cmd.Output(); err == nil {
+				var pr struct {
+					State string `json:"state"`
+				}
+				if json.Unmarshal(output, &pr) == nil {
+					switch strings.ToUpper(pr.State) {
+					case "MERGED":
+						return "merged", "#" + prNum
+					case "OPEN":
+						return "open", "#" + prNum
+					case "CLOSED":
+						return "closed", "#" + prNum
+					}
+				}
+			}
 			return "unknown", "#" + prNum
 		}
 		return "unknown", existingPRURL
@@ -4226,6 +4250,12 @@ func (c *CLI) completeWorker(args []string) error {
 	if failureReason, ok := flags["failure"]; ok && failureReason != "" {
 		reqArgs["failure_reason"] = failureReason
 		fmt.Printf("Failure reason: %s\n", failureReason)
+	}
+
+	// Add optional PR URL
+	if prURL, ok := flags["pr-url"]; ok && prURL != "" {
+		reqArgs["pr_url"] = prURL
+		fmt.Printf("PR URL: %s\n", prURL)
 	}
 
 	client := socket.NewClient(c.paths.DaemonSock)

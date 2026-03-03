@@ -150,6 +150,7 @@ type Agent struct {
 	Task            string    `json:"task,omitempty"`           // Only for workers
 	Summary         string    `json:"summary,omitempty"`        // Brief summary of work done (workers only)
 	FailureReason   string    `json:"failure_reason,omitempty"` // Why the task failed (workers only)
+	PRURL           string    `json:"pr_url,omitempty"`         // PR URL created by worker (workers only)
 	CreatedAt       time.Time `json:"created_at"`
 	LastNudge       time.Time `json:"last_nudge,omitempty"`
 	ReadyForCleanup bool      `json:"ready_for_cleanup,omitempty"` // Only for workers
@@ -683,6 +684,26 @@ func (s *State) UpdateTaskHistorySummary(repoName, taskName, summary, failureRea
 	}
 
 	return fmt.Errorf("task %q not found in history", taskName)
+}
+
+// GetPendingTaskHistory returns task history entries with open or unknown status
+// that have a branch (and thus might have a PR to check). Used by the PR outcome tracking loop.
+func (s *State) GetPendingTaskHistory(repoName string) ([]TaskHistoryEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return nil, fmt.Errorf("repository %q not found", repoName)
+	}
+
+	var pending []TaskHistoryEntry
+	for _, entry := range repo.TaskHistory {
+		if entry.Branch != "" && (entry.Status == TaskStatusOpen || entry.Status == TaskStatusUnknown) {
+			pending = append(pending, entry)
+		}
+	}
+	return pending, nil
 }
 
 // saveUnlocked saves state without acquiring lock (caller must hold lock)

@@ -2206,3 +2206,70 @@ func TestGetTaskHistoryNoLimit(t *testing.T) {
 		t.Errorf("GetTaskHistory() with limit=0 returned %d entries, want 5", len(history))
 	}
 }
+
+func TestGetPendingTaskHistory(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Create a repo
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test-repo",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Add entries with different statuses
+	entries := []TaskHistoryEntry{
+		{Name: "worker-1", Task: "Task 1", Branch: "work/worker-1", Status: TaskStatusOpen, CreatedAt: time.Now()},
+		{Name: "worker-2", Task: "Task 2", Branch: "work/worker-2", Status: TaskStatusMerged, CreatedAt: time.Now()},
+		{Name: "worker-3", Task: "Task 3", Branch: "work/worker-3", Status: TaskStatusUnknown, CreatedAt: time.Now()},
+		{Name: "worker-4", Task: "Task 4", Branch: "", Status: TaskStatusUnknown, CreatedAt: time.Now()}, // No branch
+		{Name: "worker-5", Task: "Task 5", Branch: "work/worker-5", Status: TaskStatusFailed, CreatedAt: time.Now()},
+		{Name: "worker-6", Task: "Task 6", Branch: "work/worker-6", Status: TaskStatusClosed, CreatedAt: time.Now()},
+	}
+
+	for _, entry := range entries {
+		if err := s.AddTaskHistory("test-repo", entry); err != nil {
+			t.Fatalf("AddTaskHistory() failed: %v", err)
+		}
+	}
+
+	// Get pending entries - should only return open and unknown with branches
+	pending, err := s.GetPendingTaskHistory("test-repo")
+	if err != nil {
+		t.Fatalf("GetPendingTaskHistory() failed: %v", err)
+	}
+
+	if len(pending) != 2 {
+		t.Fatalf("GetPendingTaskHistory() returned %d entries, want 2", len(pending))
+	}
+
+	// Should be worker-1 (open) and worker-3 (unknown)
+	names := map[string]bool{}
+	for _, entry := range pending {
+		names[entry.Name] = true
+	}
+	if !names["worker-1"] {
+		t.Error("Expected worker-1 (open) in pending results")
+	}
+	if !names["worker-3"] {
+		t.Error("Expected worker-3 (unknown) in pending results")
+	}
+}
+
+func TestGetPendingTaskHistoryNonExistentRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	_, err := s.GetPendingTaskHistory("nonexistent")
+	if err == nil {
+		t.Error("GetPendingTaskHistory() should fail for nonexistent repo")
+	}
+}

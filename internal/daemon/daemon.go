@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -106,12 +108,13 @@ func (d *Daemon) Start() error {
 	d.restoreTrackedRepos()
 
 	// Start core loops after restore completes
-	d.wg.Add(5)
+	d.wg.Add(6)
 	go d.healthCheckLoop()
 	go d.messageRouterLoop()
 	go d.wakeLoop()
 	go d.serverLoop()
 	go d.worktreeRefreshLoop()
+	go d.prOutcomeTrackingLoop()
 
 	return nil
 }
@@ -611,6 +614,149 @@ func (d *Daemon) TriggerWorktreeRefresh() {
 	d.refreshWorktrees()
 }
 
+// prOutcomeTrackingLoop periodically checks pending task history entries for PR outcome changes
+func (d *Daemon) prOutcomeTrackingLoop() {
+	defer d.wg.Done()
+	d.logger.Info("Starting PR outcome tracking loop")
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	// Run once after a short delay on startup
+	select {
+	case <-time.After(1 * time.Minute):
+		d.updatePROutcomes()
+	case <-d.ctx.Done():
+		d.logger.Info("PR outcome tracking loop stopped")
+		return
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			d.updatePROutcomes()
+		case <-d.ctx.Done():
+			d.logger.Info("PR outcome tracking loop stopped")
+			return
+		}
+	}
+}
+
+// TriggerPROutcomeTracking triggers an immediate PR outcome check (for testing)
+func (d *Daemon) TriggerPROutcomeTracking() {
+	d.updatePROutcomes()
+}
+
+// updatePROutcomes checks all pending task history entries and updates their PR status
+func (d *Daemon) updatePROutcomes() {
+	d.logger.Debug("Checking PR outcomes for pending tasks")
+
+	repos := d.state.ListRepos()
+	for _, repoName := range repos {
+		pending, err := d.state.GetPendingTaskHistory(repoName)
+		if err != nil {
+			d.logger.Debug("Could not get pending task history for %s: %v", repoName, err)
+			continue
+		}
+
+		if len(pending) == 0 {
+			continue
+		}
+
+		repoPath := d.paths.RepoDir(repoName)
+		if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+			continue
+		}
+
+		for _, entry := range pending {
+			status, prURL, prNumber := d.checkPRStatus(repoPath, entry)
+			if status == "" || status == state.TaskStatusUnknown {
+				continue
+			}
+
+			// Update the entry if status changed
+			if status != entry.Status || (prURL != "" && entry.PRURL == "") {
+				if err := d.state.UpdateTaskHistoryStatus(repoName, entry.Name, status, prURL, prNumber); err != nil {
+					d.logger.Debug("Could not update task history for %s/%s: %v", repoName, entry.Name, err)
+				} else {
+					d.logger.Info("Updated PR outcome for %s/%s: %s (PR #%d)", repoName, entry.Name, status, prNumber)
+				}
+			}
+		}
+	}
+}
+
+// checkPRStatus queries GitHub for the PR status of a task history entry
+func (d *Daemon) checkPRStatus(repoPath string, entry state.TaskHistoryEntry) (state.TaskStatus, string, int) {
+	// If we already have a PR URL with a number, check by number (faster)
+	if entry.PRNumber > 0 {
+		return d.checkPRStatusByNumber(repoPath, entry.PRNumber, entry.PRURL)
+	}
+
+	// Otherwise query by branch
+	if entry.Branch == "" {
+		return "", "", 0
+	}
+
+	cmd := exec.Command("gh", "pr", "list", "--head", entry.Branch, "--state", "all",
+		"--json", "number,state,url", "--limit", "1")
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return "", "", 0
+	}
+
+	var prs []struct {
+		Number int    `json:"number"`
+		State  string `json:"state"`
+		URL    string `json:"url"`
+	}
+	if err := json.Unmarshal(output, &prs); err != nil || len(prs) == 0 {
+		return "", "", 0
+	}
+
+	pr := prs[0]
+	return ghStateToTaskStatus(pr.State), pr.URL, pr.Number
+}
+
+// checkPRStatusByNumber queries GitHub for a specific PR number
+func (d *Daemon) checkPRStatusByNumber(repoPath string, prNumber int, prURL string) (state.TaskStatus, string, int) {
+	cmd := exec.Command("gh", "pr", "view", strconv.Itoa(prNumber), "--json", "state,url")
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return "", "", 0
+	}
+
+	var pr struct {
+		State string `json:"state"`
+		URL   string `json:"url"`
+	}
+	if err := json.Unmarshal(output, &pr); err != nil {
+		return "", "", 0
+	}
+
+	url := prURL
+	if pr.URL != "" {
+		url = pr.URL
+	}
+	return ghStateToTaskStatus(pr.State), url, prNumber
+}
+
+// ghStateToTaskStatus converts GitHub PR state to TaskStatus
+func ghStateToTaskStatus(ghState string) state.TaskStatus {
+	switch strings.ToUpper(ghState) {
+	case "MERGED":
+		return state.TaskStatusMerged
+	case "OPEN":
+		return state.TaskStatusOpen
+	case "CLOSED":
+		return state.TaskStatusClosed
+	default:
+		return state.TaskStatusUnknown
+	}
+}
+
 // handleRequest handles incoming socket requests
 func (d *Daemon) handleRequest(req socket.Request) socket.Response {
 	d.logger.Debug("Handling request: %s", req.Command)
@@ -1047,6 +1193,9 @@ func (d *Daemon) handleCompleteAgent(req socket.Request) socket.Response {
 	if failureReason := getOptionalStringArg(req.Args, "failure_reason", ""); failureReason != "" {
 		agent.FailureReason = failureReason
 	}
+	if prURL := getOptionalStringArg(req.Args, "pr_url", ""); prURL != "" {
+		agent.PRURL = prURL
+	}
 
 	if err := d.state.UpdateAgent(repoName, agentName, agent); err != nil {
 		return socket.ErrorResponse("%s", err.Error())
@@ -1468,11 +1617,24 @@ func (d *Daemon) recordTaskHistory(repoName, agentName string, agent state.Agent
 		status = state.TaskStatusFailed
 	}
 
+	// Extract PR URL and number from agent
+	prURL := agent.PRURL
+	prNumber := 0
+	if prURL != "" {
+		prNumber = parsePRNumber(prURL)
+		// If we have a PR URL and no failure, mark as open
+		if status != state.TaskStatusFailed {
+			status = state.TaskStatusOpen
+		}
+	}
+
 	entry := state.TaskHistoryEntry{
 		Name:          agentName,
 		Task:          agent.Task,
 		Branch:        branch,
-		Status:        status, // Will be updated when displaying if a PR exists
+		PRURL:         prURL,
+		PRNumber:      prNumber,
+		Status:        status,
 		Summary:       agent.Summary,
 		FailureReason: agent.FailureReason,
 		CreatedAt:     agent.CreatedAt,
@@ -1482,8 +1644,20 @@ func (d *Daemon) recordTaskHistory(repoName, agentName string, agent state.Agent
 	if err := d.state.AddTaskHistory(repoName, entry); err != nil {
 		d.logger.Warn("Failed to record task history for %s: %v", agentName, err)
 	} else {
-		d.logger.Info("Recorded task history for %s (branch: %s, summary: %q)", agentName, branch, agent.Summary)
+		d.logger.Info("Recorded task history for %s (branch: %s, pr: %s, summary: %q)", agentName, branch, prURL, agent.Summary)
 	}
+}
+
+// parsePRNumber extracts the PR number from a GitHub PR URL
+// e.g., "https://github.com/owner/repo/pull/123" -> 123
+func parsePRNumber(prURL string) int {
+	parts := strings.Split(strings.TrimRight(prURL, "/"), "/")
+	if len(parts) >= 2 && parts[len(parts)-2] == "pull" {
+		if n, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 // handleTaskHistory returns the task history for a repository

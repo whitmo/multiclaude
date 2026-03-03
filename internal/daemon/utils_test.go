@@ -370,3 +370,149 @@ func TestIsLogFileEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+func TestRecordTaskHistoryWithPRURL(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	// Add a test repo
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "test-session",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	// Test recording task with PR URL
+	agent := state.Agent{
+		Type:         state.AgentTypeWorker,
+		WorktreePath: "/tmp/test-worker",
+		TmuxWindow:   "test-window",
+		Task:         "implement feature Y",
+		Summary:      "created PR",
+		PRURL:        "https://github.com/test/repo/pull/42",
+		CreatedAt:    time.Now().Add(-1 * time.Hour),
+	}
+
+	d.recordTaskHistory("test-repo", "pr-worker", agent)
+
+	// Verify task was recorded with PR info
+	history, err := d.state.GetTaskHistory("test-repo", 10)
+	if err != nil {
+		t.Fatalf("GetTaskHistory() failed: %v", err)
+	}
+
+	if len(history) == 0 {
+		t.Fatal("Expected task history entry")
+	}
+
+	entry := history[0]
+	if entry.PRURL != "https://github.com/test/repo/pull/42" {
+		t.Errorf("Entry PRURL = %q, want %q", entry.PRURL, "https://github.com/test/repo/pull/42")
+	}
+	if entry.PRNumber != 42 {
+		t.Errorf("Entry PRNumber = %d, want %d", entry.PRNumber, 42)
+	}
+	// With a PR URL and no failure, status should be open
+	if entry.Status != state.TaskStatusOpen {
+		t.Errorf("Entry status = %q, want %q", entry.Status, state.TaskStatusOpen)
+	}
+}
+
+func TestRecordTaskHistoryWithPRURLAndFailure(t *testing.T) {
+	d, cleanup := setupTestDaemon(t)
+	defer cleanup()
+
+	// Add a test repo
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "test-session",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.state.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	// A worker with both PR URL and failure reason - failure takes precedence
+	agent := state.Agent{
+		Type:          state.AgentTypeWorker,
+		TmuxWindow:    "test-window",
+		Task:          "broken feature",
+		PRURL:         "https://github.com/test/repo/pull/99",
+		FailureReason: "CI failed",
+		CreatedAt:     time.Now(),
+	}
+
+	d.recordTaskHistory("test-repo", "failed-pr-worker", agent)
+
+	history, err := d.state.GetTaskHistory("test-repo", 10)
+	if err != nil {
+		t.Fatalf("GetTaskHistory() failed: %v", err)
+	}
+
+	entry := history[0]
+	// Failure should take precedence over PR URL
+	if entry.Status != state.TaskStatusFailed {
+		t.Errorf("Entry status = %q, want %q", entry.Status, state.TaskStatusFailed)
+	}
+	// But PR info should still be recorded
+	if entry.PRURL != "https://github.com/test/repo/pull/99" {
+		t.Errorf("Entry PRURL = %q, want %q", entry.PRURL, "https://github.com/test/repo/pull/99")
+	}
+	if entry.PRNumber != 99 {
+		t.Errorf("Entry PRNumber = %d, want %d", entry.PRNumber, 99)
+	}
+}
+
+func TestParsePRNumber(t *testing.T) {
+	tests := []struct {
+		name   string
+		url    string
+		want   int
+	}{
+		{"standard GitHub PR URL", "https://github.com/owner/repo/pull/123", 123},
+		{"URL with trailing slash", "https://github.com/owner/repo/pull/456/", 456},
+		{"PR number 1", "https://github.com/test/repo/pull/1", 1},
+		{"large PR number", "https://github.com/test/repo/pull/99999", 99999},
+		{"not a PR URL", "https://github.com/owner/repo/issues/123", 0},
+		{"empty URL", "", 0},
+		{"just a number", "123", 0},
+		{"short URL", "pull/42", 42},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parsePRNumber(tt.url)
+			if got != tt.want {
+				t.Errorf("parsePRNumber(%q) = %d, want %d", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGhStateToTaskStatus(t *testing.T) {
+	tests := []struct {
+		ghState string
+		want    state.TaskStatus
+	}{
+		{"MERGED", state.TaskStatusMerged},
+		{"OPEN", state.TaskStatusOpen},
+		{"CLOSED", state.TaskStatusClosed},
+		{"merged", state.TaskStatusMerged},
+		{"open", state.TaskStatusOpen},
+		{"closed", state.TaskStatusClosed},
+		{"unknown", state.TaskStatusUnknown},
+		{"", state.TaskStatusUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.ghState, func(t *testing.T) {
+			got := ghStateToTaskStatus(tt.ghState)
+			if got != tt.want {
+				t.Errorf("ghStateToTaskStatus(%q) = %q, want %q", tt.ghState, got, tt.want)
+			}
+		})
+	}
+}

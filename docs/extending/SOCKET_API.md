@@ -46,7 +46,7 @@ Each command below matches a `case` in `handleRequest`.
 | `add_agent` | Register an agent in state | `repo`, `name`, `type`, `worktree_path`, `tmux_window`, `session_id`, `pid` |
 | `remove_agent` | Remove agent from state | `repo`, `name` |
 | `list_agents` | List agents for a repo | `repo` |
-| `complete_agent` | Mark agent ready for cleanup | `repo`, `name`, `summary`, `failure_reason` |
+| `complete_agent` | Mark agent ready for cleanup | `repo`, `name`, `summary`, `failure_reason`, `pr_url` |
 | `restart_agent` | Restart a persistent agent | `repo`, `name` |
 | `trigger_cleanup` | Force cleanup cycle | none |
 | `repair_state` | Run state repair routine | none |
@@ -540,7 +540,8 @@ class MulticlaudeClient {
     "repo": "my-app",
     "name": "clever-fox",
     "summary": "Added JWT authentication with refresh tokens",
-    "failure_reason": ""
+    "failure_reason": "",
+    "pr_url": "https://github.com/owner/my-app/pull/42"
   }
 }
 ```
@@ -550,6 +551,7 @@ class MulticlaudeClient {
 - `name` (string, required): Agent name
 - `summary` (string, optional): Completion summary
 - `failure_reason` (string, optional): Failure reason (if task failed)
+- `pr_url` (string, optional): URL of the pull request created by the worker
 
 **Response:**
 ```json

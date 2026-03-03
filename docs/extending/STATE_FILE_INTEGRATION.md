@@ -2,7 +2,7 @@
 
 <!-- state-struct: State repos current_repo -->
 <!-- state-struct: Repository github_url tmux_session agents task_history merge_queue_config pr_shepherd_config fork_config target_branch -->
-<!-- state-struct: Agent type worktree_path tmux_window session_id pid task summary failure_reason created_at last_nudge ready_for_cleanup -->
+<!-- state-struct: Agent type worktree_path tmux_window session_id pid task summary failure_reason pr_url created_at last_nudge ready_for_cleanup -->
 <!-- state-struct: TaskHistoryEntry name task branch pr_url pr_number status summary failure_reason created_at completed_at -->
 <!-- state-struct: MergeQueueConfig enabled track_mode -->
 <!-- state-struct: PRShepherdConfig enabled track_mode -->
@@ -50,6 +50,7 @@ The daemon persists state to `~/.multiclaude/state.json` and writes it atomicall
   "task": "Implement feature X",       // Only for workers
   "summary": "Added auth module",      // Only for workers (completion summary)
   "failure_reason": "Tests failed",    // Only for workers (if task failed)
+  "pr_url": "https://github.com/user/repo/pull/42", // Only for workers (PR URL if created)
   "created_at": "2024-01-15T10:30:00Z",
   "last_nudge": "2024-01-15T10:35:00Z",
   "ready_for_cleanup": false           // Only for workers (signals completion)
