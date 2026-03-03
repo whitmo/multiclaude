@@ -1420,6 +1420,28 @@ func TestHandleRestartAgentTableDriven(t *testing.T) {
 			wantSuccess: false,
 			wantError:   "complete",
 		},
+		{
+			name: "agent with missing worktree path",
+			args: map[string]interface{}{
+				"repo":  "test-repo",
+				"agent": "broken-agent",
+			},
+			setupState: func(s *state.State) {
+				s.AddRepo("test-repo", &state.Repository{
+					GithubURL:   "https://github.com/test/repo",
+					TmuxSession: "test-session",
+					Agents:      make(map[string]state.Agent),
+				})
+				s.AddAgent("test-repo", "broken-agent", state.Agent{
+					Type:         state.AgentTypeWorker,
+					TmuxWindow:   "broken-window",
+					WorktreePath: "/nonexistent/path/that/does/not/exist",
+					CreatedAt:    time.Now(),
+				})
+			},
+			wantSuccess: false,
+			wantError:   "worktree path",
+		},
 	}
 
 	for _, tt := range tests {

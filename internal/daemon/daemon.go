@@ -329,6 +329,31 @@ func (d *Daemon) checkAgentHealth() {
 			}
 
 			if !hasWindow {
+				// For persistent agents, try to recreate the window and restart
+				if agent.Type.IsPersistent() {
+					d.logger.Info("Agent %s window missing, attempting to recreate and restart", agentName)
+					worktreePath := agent.WorktreePath
+					if worktreePath == "" {
+						worktreePath = d.paths.RepoDir(repoName)
+					}
+					// Verify worktree still exists before recreating
+					if _, statErr := os.Stat(worktreePath); statErr == nil {
+						cmd := exec.Command("tmux", "new-window", "-d", "-t", repo.TmuxSession, "-n", agentName, "-c", worktreePath)
+						runErr := cmd.Run()
+						if runErr == nil {
+							if restartErr := d.restartAgent(repoName, agentName, agent, repo); restartErr != nil {
+								d.logger.Error("Failed to restart agent %s after window recreation: %v", agentName, restartErr)
+								appendToSliceMap(deadAgents, repoName, agentName)
+							} else {
+								d.logger.Info("Successfully recreated window and restarted agent %s", agentName)
+							}
+							continue
+						}
+						d.logger.Error("Failed to recreate tmux window for agent %s: %v", agentName, runErr)
+					} else {
+						d.logger.Warn("Agent %s worktree path %s no longer exists", agentName, worktreePath)
+					}
+				}
 				d.logger.Warn("Agent %s window not found, marking for cleanup", agentName)
 				appendToSliceMap(deadAgents, repoName, agentName)
 				continue
@@ -1128,12 +1153,29 @@ func (d *Daemon) handleRestartAgent(req socket.Request) socket.Response {
 		return socket.ErrorResponse("repository '%s' not found in state", repoName)
 	}
 
+	// Verify the agent's worktree path still exists
+	if agent.WorktreePath != "" {
+		if _, err := os.Stat(agent.WorktreePath); os.IsNotExist(err) {
+			return socket.ErrorResponse("agent '%s' worktree path '%s' no longer exists - the agent may need to be fully recreated", agentName, agent.WorktreePath)
+		}
+	}
+
 	hasWindow, err := d.tmux.HasWindow(d.ctx, repo.TmuxSession, agentName)
 	if err != nil {
 		return socket.ErrorResponse("failed to check tmux window: %v", err)
 	}
 	if !hasWindow {
-		return socket.ErrorResponse("tmux window '%s' does not exist - the agent may need to be recreated", agentName)
+		// Recreate the tmux window so the agent can be restarted
+		d.logger.Info("Tmux window '%s' missing for agent %s, recreating", agentName, agentName)
+		worktreePath := agent.WorktreePath
+		if worktreePath == "" {
+			worktreePath = d.paths.RepoDir(repoName)
+		}
+		cmd := exec.Command("tmux", "new-window", "-d", "-t", repo.TmuxSession, "-n", agentName, "-c", worktreePath)
+		if err := cmd.Run(); err != nil {
+			return socket.ErrorResponse("failed to recreate tmux window for agent '%s': %v", agentName, err)
+		}
+		d.logger.Info("Recreated tmux window '%s' for agent %s", agentName, agentName)
 	}
 
 	// Check if agent is already running
@@ -2146,6 +2188,13 @@ func (d *Daemon) writePromptFileWithPrefix(repoName string, agentType state.Agen
 // It uses --resume to continue the existing session if history exists.
 // This works for all agent types: supervisor, merge-queue, workspace, workers, and review agents.
 func (d *Daemon) restartAgent(repoName, agentName string, agent state.Agent, repo *state.Repository) error {
+	// Verify the agent's worktree path exists
+	if agent.WorktreePath != "" {
+		if _, err := os.Stat(agent.WorktreePath); os.IsNotExist(err) {
+			return fmt.Errorf("agent worktree path '%s' no longer exists", agent.WorktreePath)
+		}
+	}
+
 	// Check if the session has history
 	home, err := os.UserHomeDir()
 	if err != nil {
