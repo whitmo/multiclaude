@@ -48,6 +48,27 @@ func resolvePathWithSymlinks(path string) (string, error) {
 	return evalPath, nil
 }
 
+// resolveGitDir resolves the actual git directory for a worktree path.
+// For regular repos, .git is a directory. For worktrees, .git is a file
+// containing "gitdir: <path>" pointing to the real git dir. The path may be
+// relative to the worktree, so we resolve it to absolute.
+func resolveGitDir(worktreePath string) string {
+	gitDir := filepath.Join(worktreePath, ".git")
+	content, err := os.ReadFile(gitDir)
+	if err != nil {
+		return gitDir
+	}
+	s := string(content)
+	if !strings.HasPrefix(s, "gitdir:") {
+		return gitDir
+	}
+	resolved := strings.TrimSpace(strings.TrimPrefix(s, "gitdir:"))
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(worktreePath, resolved)
+	}
+	return filepath.Clean(resolved)
+}
+
 // Create creates a new git worktree
 func (m *Manager) Create(path, branch string) error {
 	_, err := m.runGit("worktree", "add", path, branch)
@@ -643,11 +664,7 @@ func GetWorktreeState(worktreePath string, remote string, mainBranch string) (Wo
 	}
 
 	// Check for mid-rebase state
-	gitDir := filepath.Join(worktreePath, ".git")
-	// For worktrees, .git is a file pointing to the real git dir
-	if content, err := os.ReadFile(gitDir); err == nil && strings.HasPrefix(string(content), "gitdir:") {
-		gitDir = strings.TrimSpace(strings.TrimPrefix(string(content), "gitdir:"))
-	}
+	gitDir := resolveGitDir(worktreePath)
 	rebaseDir := filepath.Join(gitDir, "rebase-merge")
 	rebaseApplyDir := filepath.Join(gitDir, "rebase-apply")
 	if _, err := os.Stat(rebaseDir); err == nil {
@@ -740,17 +757,24 @@ type RefreshResult struct {
 // It fetches from the remote, stashes any uncommitted changes, rebases onto main,
 // and restores the stash. Returns detailed results about what happened.
 func RefreshWorktree(worktreePath string, remote string, mainBranch string) RefreshResult {
+	return refreshWorktree(worktreePath, remote, mainBranch, false)
+}
+
+// RefreshWorktreePreFetched is like RefreshWorktree but skips the fetch step.
+// Use this when the caller has already fetched from the remote (e.g., the daemon
+// fetches once per repo before refreshing multiple worktrees).
+func RefreshWorktreePreFetched(worktreePath string, remote string, mainBranch string) RefreshResult {
+	return refreshWorktree(worktreePath, remote, mainBranch, true)
+}
+
+func refreshWorktree(worktreePath string, remote string, mainBranch string, skipFetch bool) RefreshResult {
 	result := RefreshResult{
 		WorktreePath: worktreePath,
 	}
 
 	// Check for detached HEAD, mid-rebase, or mid-merge states
 	// These must be resolved before we can safely refresh
-	gitDir := filepath.Join(worktreePath, ".git")
-	// For worktrees, .git is a file pointing to the real git dir
-	if content, err := os.ReadFile(gitDir); err == nil && strings.HasPrefix(string(content), "gitdir:") {
-		gitDir = strings.TrimSpace(strings.TrimPrefix(string(content), "gitdir:"))
-	}
+	gitDir := resolveGitDir(worktreePath)
 
 	// Check for mid-rebase state
 	if _, err := os.Stat(filepath.Join(gitDir, "rebase-merge")); err == nil {
@@ -797,12 +821,14 @@ func RefreshWorktree(worktreePath string, remote string, mainBranch string) Refr
 		return result
 	}
 
-	// Fetch latest from remote
-	cmd = exec.Command("git", "fetch", remote, mainBranch)
-	cmd.Dir = worktreePath
-	if output, err := cmd.CombinedOutput(); err != nil {
-		result.Error = fmt.Errorf("failed to fetch from %s: %w\nOutput: %s", remote, err, output)
-		return result
+	// Fetch latest from remote (skip if caller already fetched)
+	if !skipFetch {
+		cmd = exec.Command("git", "fetch", remote, mainBranch)
+		cmd.Dir = worktreePath
+		if output, err := cmd.CombinedOutput(); err != nil {
+			result.Error = fmt.Errorf("failed to fetch from %s: %w\nOutput: %s", remote, err, output)
+			return result
+		}
 	}
 
 	// Check for uncommitted changes
@@ -845,14 +871,19 @@ func RefreshWorktree(worktreePath string, remote string, mainBranch string) Refr
 		if len(conflictFiles) > 0 && conflictFiles[0] != "" {
 			result.HasConflicts = true
 			result.ConflictFiles = conflictFiles
-			// Abort the rebase to leave the worktree in a clean state
-			abortCmd := exec.Command("git", "rebase", "--abort")
-			abortCmd.Dir = worktreePath
-			abortCmd.Run()
 		}
+
+		// Abort the rebase to leave the worktree in a clean state
+		abortCmd := exec.Command("git", "rebase", "--abort")
+		abortCmd.Dir = worktreePath
+		if abortErr := abortCmd.Run(); abortErr != nil {
+			result.Error = fmt.Errorf("rebase failed and abort also failed (manual cleanup needed): rebase: %w, abort: %v\nOutput: %s", rebaseErr, abortErr, rebaseOutput)
+			return result
+		}
+
 		result.Error = fmt.Errorf("rebase failed: %w\nOutput: %s", rebaseErr, rebaseOutput)
 
-		// Restore stash if we stashed
+		// Restore stash if we stashed (safe now that rebase is aborted)
 		if result.WasStashed {
 			popCmd := exec.Command("git", "stash", "pop")
 			popCmd.Dir = worktreePath
@@ -873,9 +904,19 @@ func RefreshWorktree(worktreePath string, remote string, mainBranch string) Refr
 	if result.WasStashed {
 		cmd = exec.Command("git", "stash", "pop")
 		cmd.Dir = worktreePath
-		if err := cmd.Run(); err != nil {
-			// Stash pop might fail if there are conflicts
-			result.Error = fmt.Errorf("stash pop failed (manual resolution may be needed): %w", err)
+		popOutput, popErr := cmd.CombinedOutput()
+		if popErr != nil {
+			// Check if stash pop caused conflicts
+			conflictCmd := exec.Command("git", "diff", "--name-only", "--diff-filter=U")
+			conflictCmd.Dir = worktreePath
+			if cOutput, cErr := conflictCmd.Output(); cErr == nil {
+				files := strings.Split(strings.TrimSpace(string(cOutput)), "\n")
+				if len(files) > 0 && files[0] != "" {
+					result.HasConflicts = true
+					result.ConflictFiles = files
+				}
+			}
+			result.Error = fmt.Errorf("stash pop failed (manual resolution may be needed): %w\nOutput: %s", popErr, popOutput)
 		} else {
 			result.StashRestored = true
 		}

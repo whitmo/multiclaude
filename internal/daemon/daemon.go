@@ -582,7 +582,7 @@ func (d *Daemon) refreshWorktrees() {
 
 			// Refresh the worktree
 			d.logger.Info("Refreshing worktree for %s/%s (%d commits behind)", repoName, agentName, wtState.CommitsBehind)
-			result := worktree.RefreshWorktree(agent.WorktreePath, remote, mainBranch)
+			result := worktree.RefreshWorktreePreFetched(agent.WorktreePath, remote, mainBranch)
 
 			if result.Error != nil {
 				if result.HasConflicts {

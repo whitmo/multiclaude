@@ -216,11 +216,7 @@ func TestRefreshWorktree_MidRebase(t *testing.T) {
 	}
 
 	// Simulate mid-rebase state by creating the rebase-merge directory
-	gitDir := filepath.Join(wtPath, ".git")
-	content, err := os.ReadFile(gitDir)
-	if err == nil && strings.HasPrefix(string(content), "gitdir:") {
-		gitDir = strings.TrimSpace(strings.TrimPrefix(string(content), "gitdir:"))
-	}
+	gitDir := resolveGitDir(wtPath)
 	rebaseDir := filepath.Join(gitDir, "rebase-merge")
 	if err := os.MkdirAll(rebaseDir, 0755); err != nil {
 		t.Fatalf("Failed to create rebase-merge dir: %v", err)
@@ -249,11 +245,7 @@ func TestRefreshWorktree_MidMerge(t *testing.T) {
 	}
 
 	// Simulate mid-merge state by creating MERGE_HEAD file
-	gitDir := filepath.Join(wtPath, ".git")
-	content, err := os.ReadFile(gitDir)
-	if err == nil && strings.HasPrefix(string(content), "gitdir:") {
-		gitDir = strings.TrimSpace(strings.TrimPrefix(string(content), "gitdir:"))
-	}
+	gitDir := resolveGitDir(wtPath)
 	mergeHead := filepath.Join(gitDir, "MERGE_HEAD")
 	if err := os.WriteFile(mergeHead, []byte("abc123"), 0644); err != nil {
 		t.Fatalf("Failed to create MERGE_HEAD: %v", err)
@@ -594,11 +586,7 @@ func TestGetWorktreeState_WithMidRebaseApply(t *testing.T) {
 	}
 
 	// Simulate mid-rebase-apply state
-	gitDir := filepath.Join(wtPath, ".git")
-	content, err := os.ReadFile(gitDir)
-	if err == nil && strings.HasPrefix(string(content), "gitdir:") {
-		gitDir = strings.TrimSpace(strings.TrimPrefix(string(content), "gitdir:"))
-	}
+	gitDir := resolveGitDir(wtPath)
 	rebaseApplyDir := filepath.Join(gitDir, "rebase-apply")
 	if err := os.MkdirAll(rebaseApplyDir, 0755); err != nil {
 		t.Fatalf("Failed to create rebase-apply dir: %v", err)
@@ -615,5 +603,175 @@ func TestGetWorktreeState_WithMidRebaseApply(t *testing.T) {
 	}
 	if !strings.Contains(state.RefreshReason, "mid-rebase") {
 		t.Errorf("Expected mid-rebase reason, got: %s", state.RefreshReason)
+	}
+}
+
+func TestRefreshWorktree_RebaseConflict(t *testing.T) {
+	repoPath, cleanup := createTestRepoWithRemote(t)
+	defer cleanup()
+
+	manager := NewManager(repoPath)
+
+	// Create a worktree with a feature branch
+	wtPath := filepath.Join(repoPath, "wt-conflict")
+	if err := manager.CreateNewBranch(wtPath, "feature-conflict", "main"); err != nil {
+		t.Fatalf("Failed to create worktree: %v", err)
+	}
+
+	// Make a change to README.md in the worktree (will conflict with remote)
+	conflictFile := filepath.Join(wtPath, "README.md")
+	if err := os.WriteFile(conflictFile, []byte("# Feature branch change\n"), 0644); err != nil {
+		t.Fatalf("Failed to write conflict file: %v", err)
+	}
+	cmd := exec.Command("git", "add", "README.md")
+	cmd.Dir = wtPath
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to git add: %v", err)
+	}
+	cmd = exec.Command("git", "commit", "-m", "feature change to README")
+	cmd.Dir = wtPath
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to commit: %v", err)
+	}
+
+	// Push a conflicting change to main via the remote
+	// We need to modify README.md on main too
+	remoteURL := ""
+	cmd = exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = repoPath
+	if out, err := cmd.Output(); err == nil {
+		remoteURL = strings.TrimSpace(string(out))
+	}
+
+	tempClone, err := os.MkdirTemp("", "conflict-clone-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempClone)
+
+	cmd = exec.Command("git", "clone", remoteURL, tempClone)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to clone: %v", err)
+	}
+	cmd = exec.Command("git", "config", "user.name", "Test User")
+	cmd.Dir = tempClone
+	cmd.Run()
+	cmd = exec.Command("git", "config", "user.email", "test@example.com")
+	cmd.Dir = tempClone
+	cmd.Run()
+
+	if err := os.WriteFile(filepath.Join(tempClone, "README.md"), []byte("# Conflicting main change\n"), 0644); err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+	cmd = exec.Command("git", "add", "README.md")
+	cmd.Dir = tempClone
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to add: %v", err)
+	}
+	cmd = exec.Command("git", "commit", "-m", "conflicting main change")
+	cmd.Dir = tempClone
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to commit: %v", err)
+	}
+	cmd = exec.Command("git", "push", "origin", "main")
+	cmd.Dir = tempClone
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to push: %v", err)
+	}
+
+	// Now refresh the worktree - should detect conflict, abort, and return clean state
+	result := RefreshWorktree(wtPath, "origin", "main")
+
+	if result.Error == nil {
+		t.Fatal("Expected error from conflicting rebase")
+	}
+	if !result.HasConflicts {
+		t.Error("Expected HasConflicts to be true")
+	}
+	if len(result.ConflictFiles) == 0 {
+		t.Error("Expected conflict files to be reported")
+	}
+
+	// Verify worktree is not left in mid-rebase state
+	gitDir := resolveGitDir(wtPath)
+	if _, err := os.Stat(filepath.Join(gitDir, "rebase-merge")); err == nil {
+		t.Error("Worktree should not be in mid-rebase state after abort")
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "rebase-apply")); err == nil {
+		t.Error("Worktree should not be in mid-rebase-apply state after abort")
+	}
+
+	// Verify the worktree is still on the feature branch
+	cmd = exec.Command("git", "symbolic-ref", "--short", "HEAD")
+	cmd.Dir = wtPath
+	branchOutput, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("Failed to get branch: %v", err)
+	}
+	if strings.TrimSpace(string(branchOutput)) != "feature-conflict" {
+		t.Errorf("Expected branch feature-conflict, got %s", strings.TrimSpace(string(branchOutput)))
+	}
+}
+
+func TestRefreshWorktreePreFetched(t *testing.T) {
+	repoPath, cleanup := createTestRepoWithRemote(t)
+	defer cleanup()
+
+	manager := NewManager(repoPath)
+
+	// Create a worktree
+	wtPath := filepath.Join(repoPath, "wt-prefetched")
+	if err := manager.CreateNewBranch(wtPath, "feature-prefetched", "main"); err != nil {
+		t.Fatalf("Failed to create worktree: %v", err)
+	}
+
+	// Add a commit to remote
+	addCommitToRemote(t, repoPath, "remote-change")
+
+	// Manually fetch first (simulating daemon behavior)
+	cmd := exec.Command("git", "fetch", "origin", "main")
+	cmd.Dir = wtPath
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed to fetch: %v", err)
+	}
+
+	// Use PreFetched variant - should succeed without fetching again
+	result := RefreshWorktreePreFetched(wtPath, "origin", "main")
+	if result.Error != nil {
+		t.Errorf("Unexpected error: %v", result.Error)
+	}
+	if result.Skipped {
+		t.Errorf("Should not have been skipped: %s", result.SkipReason)
+	}
+}
+
+func TestResolveGitDir(t *testing.T) {
+	repoPath, cleanup := createTestRepo(t)
+	defer cleanup()
+
+	manager := NewManager(repoPath)
+
+	// Create a worktree
+	wtPath := filepath.Join(repoPath, "wt-gitdir")
+	if err := manager.CreateNewBranch(wtPath, "feature-gitdir", "main"); err != nil {
+		t.Fatalf("Failed to create worktree: %v", err)
+	}
+
+	// resolveGitDir should return a valid path that exists
+	gitDir := resolveGitDir(wtPath)
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		t.Errorf("resolveGitDir returned non-existent path: %s", gitDir)
+	}
+
+	// The resolved path should be absolute
+	if !filepath.IsAbs(gitDir) {
+		t.Errorf("resolveGitDir should return absolute path, got: %s", gitDir)
+	}
+
+	// For a regular repo (not a worktree), should return .git dir
+	mainGitDir := resolveGitDir(repoPath)
+	expectedMainGitDir := filepath.Join(repoPath, ".git")
+	if mainGitDir != expectedMainGitDir {
+		t.Errorf("resolveGitDir for main repo = %s, want %s", mainGitDir, expectedMainGitDir)
 	}
 }
