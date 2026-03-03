@@ -2214,16 +2214,32 @@ func (c *CLI) createWorker(args []string) error {
 		}
 	}
 
+	// Track created resources for cleanup on failure
+	var tmuxWindowCreated bool
+	cleanupOnFailure := func() {
+		if tmuxWindowCreated {
+			fmt.Printf("Cleaning up tmux window '%s' due to creation failure\n", workerName)
+			killCmd := exec.Command("tmux", "kill-window", "-t", fmt.Sprintf("%s:%s", tmuxSession, workerName))
+			_ = killCmd.Run()
+		}
+		fmt.Printf("Cleaning up worktree '%s' due to creation failure\n", wtPath)
+		cleanupWt := worktree.NewManager(repoPath)
+		_ = cleanupWt.Remove(wtPath, true)
+	}
+
 	// Create tmux window for worker (detached so it doesn't switch focus)
 	fmt.Printf("Creating tmux window: %s\n", workerName)
 	cmd := exec.Command("tmux", "new-window", "-d", "-t", tmuxSession, "-n", workerName, "-c", wtPath)
 	if err := cmd.Run(); err != nil {
+		cleanupOnFailure()
 		return errors.TmuxOperationFailed("create window", err)
 	}
+	tmuxWindowCreated = true
 
 	// Generate session ID for worker
 	workerSessionID, err := claude.GenerateSessionID()
 	if err != nil {
+		cleanupOnFailure()
 		return fmt.Errorf("failed to generate worker session ID: %w", err)
 	}
 
@@ -2255,6 +2271,7 @@ func (c *CLI) createWorker(args []string) error {
 	}
 	workerPromptFile, err := c.writeWorkerPromptFile(repoPath, workerName, workerConfig)
 	if err != nil {
+		cleanupOnFailure()
 		return fmt.Errorf("failed to write worker prompt: %w", err)
 	}
 
@@ -2269,6 +2286,7 @@ func (c *CLI) createWorker(args []string) error {
 		// Resolve claude binary
 		claudeBinary, err := c.getClaudeBinary()
 		if err != nil {
+			cleanupOnFailure()
 			return fmt.Errorf("failed to resolve claude binary: %w", err)
 		}
 
@@ -2276,6 +2294,7 @@ func (c *CLI) createWorker(args []string) error {
 		initialMessage := fmt.Sprintf("Task: %s", task)
 		pid, err := c.startClaudeInTmux(claudeBinary, tmuxSession, workerName, wtPath, workerSessionID, workerPromptFile, repoName, initialMessage)
 		if err != nil {
+			cleanupOnFailure()
 			return fmt.Errorf("failed to start worker Claude: %w", err)
 		}
 		workerPID = pid
@@ -2301,9 +2320,11 @@ func (c *CLI) createWorker(args []string) error {
 		},
 	})
 	if err != nil {
+		cleanupOnFailure()
 		return fmt.Errorf("failed to register worker: %w", err)
 	}
 	if !resp.Success {
+		cleanupOnFailure()
 		return fmt.Errorf("failed to register worker: %s", resp.Error)
 	}
 

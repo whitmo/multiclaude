@@ -347,8 +347,20 @@ func (d *Daemon) checkAgentHealth() {
 						} else {
 							d.logger.Info("Successfully restarted agent %s", agentName)
 						}
+					} else {
+						// For transient agents (workers, review), mark for cleanup
+						// since they won't restart themselves
+						d.logger.Info("Transient agent %s has dead process, marking for cleanup", agentName)
+						appendToSliceMap(deadAgents, repoName, agentName)
 					}
-					// For transient agents (workers, review), don't auto-restart - they complete and clean up
+				}
+			} else if !agent.Type.IsPersistent() {
+				// Workers with PID=0 means Claude failed to start
+				// Give a grace period (2 minutes) for startup, then mark for cleanup
+				if time.Since(agent.CreatedAt) > 2*time.Minute {
+					d.logger.Warn("Agent %s has PID=0 and was created %s ago, marking for cleanup (Claude likely failed to start)",
+						agentName, time.Since(agent.CreatedAt).Round(time.Second))
+					appendToSliceMap(deadAgents, repoName, agentName)
 				}
 			}
 		}
@@ -930,6 +942,12 @@ func (d *Daemon) handleRemoveAgent(req socket.Request) socket.Response {
 	agentName, errResp, ok := getRequiredStringArg(req.Args, "agent", "agent name is required")
 	if !ok {
 		return errResp
+	}
+
+	// Record task history for workers before removal
+	agent, exists := d.state.GetAgent(repoName, agentName)
+	if exists && agent.Type == state.AgentTypeWorker {
+		d.recordTaskHistory(repoName, agentName, agent)
 	}
 
 	if err := d.state.RemoveAgent(repoName, agentName); err != nil {
