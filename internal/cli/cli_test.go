@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dlorenc/multiclaude/internal/daemon"
+	"github.com/dlorenc/multiclaude/internal/errors"
 	"github.com/dlorenc/multiclaude/internal/messages"
 	"github.com/dlorenc/multiclaude/internal/socket"
 	"github.com/dlorenc/multiclaude/internal/state"
@@ -1034,6 +1035,271 @@ func TestCLIRepairCommand(t *testing.T) {
 	}
 }
 
+func TestRepairEnsuringCoreAgents(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Load state
+	st, err := cli.loadState()
+	if err != nil {
+		t.Fatalf("Failed to load state: %v", err)
+	}
+
+	// Initialize a test repository
+	repoName := "test-repo"
+	repoPath := cli.paths.RepoDir(repoName)
+	tmuxSession := "mc-test-repo"
+
+	// Add repository to state
+	repo := &state.Repository{
+		GithubURL:        "https://github.com/test/repo",
+		TmuxSession:      tmuxSession,
+		Agents:           make(map[string]state.Agent),
+		MergeQueueConfig: state.DefaultMergeQueueConfig(),
+		PRShepherdConfig: state.DefaultPRShepherdConfig(),
+		ForkConfig:       state.ForkConfig{IsFork: false},
+	}
+	if err := st.AddRepo(repoName, repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	// Create tmux session for testing
+	if err := exec.Command("tmux", "new-session", "-d", "-s", tmuxSession).Run(); err != nil {
+		t.Skipf("Skipping test: tmux not available or session creation failed: %v", err)
+	}
+	defer exec.Command("tmux", "kill-session", "-t", tmuxSession).Run()
+
+	// Create repository directory and initialize git
+	if err := os.MkdirAll(repoPath, 0755); err != nil {
+		t.Fatalf("Failed to create repo directory: %v", err)
+	}
+	setupTestRepo(t, repoPath)
+
+	// Run repair (should create supervisor and merge-queue)
+	err = cli.localRepair(false)
+	if err != nil {
+		t.Errorf("localRepair failed: %v", err)
+	}
+
+	// Reload state to get updated data
+	st, err = cli.loadState()
+	if err != nil {
+		t.Fatalf("Failed to reload state: %v", err)
+	}
+
+	// Verify supervisor was created
+	updatedRepo, exists := st.GetRepo(repoName)
+	if !exists {
+		t.Fatalf("Repository not found after repair")
+	}
+
+	if _, exists := updatedRepo.Agents["supervisor"]; !exists {
+		t.Errorf("Supervisor agent was not created by repair")
+	}
+
+	// Verify merge-queue was created (in non-fork mode)
+	if _, exists := updatedRepo.Agents["merge-queue"]; !exists {
+		t.Errorf("Merge-queue agent was not created by repair")
+	}
+
+	// Verify default workspace was created
+	hasWorkspace := false
+	for _, agent := range updatedRepo.Agents {
+		if agent.Type == state.AgentTypeWorkspace {
+			hasWorkspace = true
+			break
+		}
+	}
+	if !hasWorkspace {
+		t.Errorf("Default workspace was not created by repair")
+	}
+}
+
+func TestRepairEnsuringPRShepherdInForkMode(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Load state
+	st, err := cli.loadState()
+	if err != nil {
+		t.Fatalf("Failed to load state: %v", err)
+	}
+
+	// Initialize a test repository in fork mode
+	repoName := "test-fork-repo"
+	repoPath := cli.paths.RepoDir(repoName)
+	tmuxSession := "mc-test-fork-repo"
+
+	// Add repository to state (fork mode)
+	repo := &state.Repository{
+		GithubURL:        "https://github.com/test/fork",
+		TmuxSession:      tmuxSession,
+		Agents:           make(map[string]state.Agent),
+		MergeQueueConfig: state.MergeQueueConfig{Enabled: false},
+		PRShepherdConfig: state.DefaultPRShepherdConfig(),
+		ForkConfig: state.ForkConfig{
+			IsFork:        true,
+			UpstreamURL:   "https://github.com/upstream/repo",
+			UpstreamOwner: "upstream",
+			UpstreamRepo:  "repo",
+		},
+	}
+	if err := st.AddRepo(repoName, repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	// Create tmux session for testing
+	if err := exec.Command("tmux", "new-session", "-d", "-s", tmuxSession).Run(); err != nil {
+		t.Skipf("Skipping test: tmux not available or session creation failed: %v", err)
+	}
+	defer exec.Command("tmux", "kill-session", "-t", tmuxSession).Run()
+
+	// Create repository directory and initialize git
+	if err := os.MkdirAll(repoPath, 0755); err != nil {
+		t.Fatalf("Failed to create repo directory: %v", err)
+	}
+	setupTestRepo(t, repoPath)
+
+	// Run repair (should create supervisor and pr-shepherd, NOT merge-queue)
+	err = cli.localRepair(false)
+	if err != nil {
+		t.Errorf("localRepair failed: %v", err)
+	}
+
+	// Reload state to get updated data
+	st, err = cli.loadState()
+	if err != nil {
+		t.Fatalf("Failed to reload state: %v", err)
+	}
+
+	// Verify supervisor was created
+	updatedRepo, exists := st.GetRepo(repoName)
+	if !exists {
+		t.Fatalf("Repository not found after repair")
+	}
+
+	if _, exists := updatedRepo.Agents["supervisor"]; !exists {
+		t.Errorf("Supervisor agent was not created by repair")
+	}
+
+	// Verify pr-shepherd was created (in fork mode)
+	if _, exists := updatedRepo.Agents["pr-shepherd"]; !exists {
+		t.Errorf("PR-shepherd agent was not created by repair in fork mode")
+	}
+
+	// Verify merge-queue was NOT created (fork mode)
+	if _, exists := updatedRepo.Agents["merge-queue"]; exists {
+		t.Errorf("Merge-queue agent should not be created in fork mode")
+	}
+}
+
+func TestRepairDoesNotDuplicateAgents(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Load state
+	st, err := cli.loadState()
+	if err != nil {
+		t.Fatalf("Failed to load state: %v", err)
+	}
+
+	// Initialize a test repository
+	repoName := "test-repo"
+	repoPath := cli.paths.RepoDir(repoName)
+	tmuxSession := "mc-test-repo"
+
+	// Add repository with existing supervisor
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: tmuxSession,
+		Agents: map[string]state.Agent{
+			"supervisor": {
+				Type:         state.AgentTypeSupervisor,
+				WorktreePath: repoPath,
+				TmuxWindow:   "supervisor",
+				SessionID:    "existing-session-id",
+				PID:          12345,
+			},
+			"my-workspace": {
+				Type:         state.AgentTypeWorkspace,
+				WorktreePath: cli.paths.AgentWorktree(repoName, "my-workspace"),
+				TmuxWindow:   "my-workspace",
+				SessionID:    "workspace-session-id",
+				PID:          12346,
+			},
+		},
+		MergeQueueConfig: state.DefaultMergeQueueConfig(),
+		PRShepherdConfig: state.DefaultPRShepherdConfig(),
+		ForkConfig:       state.ForkConfig{IsFork: false},
+	}
+	if err := st.AddRepo(repoName, repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	// Create tmux session
+	if err := exec.Command("tmux", "new-session", "-d", "-s", tmuxSession, "-n", "supervisor").Run(); err != nil {
+		t.Skipf("Skipping test: tmux not available: %v", err)
+	}
+	defer exec.Command("tmux", "kill-session", "-t", tmuxSession).Run()
+
+	// Create workspace window
+	if err := exec.Command("tmux", "new-window", "-d", "-t", tmuxSession, "-n", "my-workspace").Run(); err != nil {
+		t.Fatalf("Failed to create workspace window: %v", err)
+	}
+
+	// Create repository directory and initialize git
+	if err := os.MkdirAll(repoPath, 0755); err != nil {
+		t.Fatalf("Failed to create repo directory: %v", err)
+	}
+	setupTestRepo(t, repoPath)
+
+	// Create workspace worktree directory
+	wsPath := cli.paths.AgentWorktree(repoName, "my-workspace")
+	if err := os.MkdirAll(wsPath, 0755); err != nil {
+		t.Fatalf("Failed to create workspace directory: %v", err)
+	}
+
+	// Run repair
+	err = cli.localRepair(false)
+	if err != nil {
+		t.Errorf("localRepair failed: %v", err)
+	}
+
+	// Reload state to get updated data
+	st, err = cli.loadState()
+	if err != nil {
+		t.Fatalf("Failed to reload state: %v", err)
+	}
+
+	// Verify supervisor still exists with same session ID (not duplicated)
+	updatedRepo, _ := st.GetRepo(repoName)
+	supervisor, exists := updatedRepo.Agents["supervisor"]
+	if !exists {
+		t.Errorf("Supervisor agent was removed")
+	} else if supervisor.SessionID != "existing-session-id" {
+		t.Errorf("Supervisor was replaced instead of kept (session ID changed)")
+	}
+
+	// Verify merge-queue was created (since it was missing)
+	if _, exists := updatedRepo.Agents["merge-queue"]; !exists {
+		t.Errorf("Merge-queue agent was not created")
+	}
+
+	// Verify default workspace was NOT created (since one already exists)
+	workspaceCount := 0
+	for _, agent := range updatedRepo.Agents {
+		if agent.Type == state.AgentTypeWorkspace {
+			workspaceCount++
+		}
+	}
+	if workspaceCount != 1 {
+		t.Errorf("Expected 1 workspace, got %d", workspaceCount)
+	}
+	if _, exists := updatedRepo.Agents["my-default-2"]; exists {
+		t.Errorf("Default workspace should not be created when workspace already exists")
+	}
+}
+
 func TestCLIDocsCommand(t *testing.T) {
 	cli, _, cleanup := setupTestEnvironment(t)
 	defer cleanup()
@@ -1623,6 +1889,53 @@ func TestValidateWorkspaceName(t *testing.T) {
 			err := validateWorkspaceName(tt.workspace)
 			if (err != nil) != tt.wantError {
 				t.Errorf("validateWorkspaceName(%q) error = %v, wantError %v", tt.workspace, err, tt.wantError)
+			}
+		})
+	}
+}
+
+// PR #340: Verify validateWorkspaceName returns structured CLIErrors
+func TestValidateWorkspaceNameStructuredErrors(t *testing.T) {
+	tests := []struct {
+		name         string
+		workspace    string
+		wantContains string
+	}{
+		{"empty", "", "cannot be empty"},
+		{"dot", ".", "cannot be '.' or '..'"},
+		{"dotdot", "..", "cannot be '.' or '..'"},
+		{"starts with dot", ".hidden", "cannot start with '.' or '-'"},
+		{"starts with dash", "-bad", "cannot start with '.' or '-'"},
+		{"ends with dot", "bad.", "cannot end with '.' or '/'"},
+		{"ends with slash", "bad/", "cannot end with '.' or '/'"},
+		{"contains dotdot", "bad..name", "cannot contain '..'"},
+		{"contains space", "bad name", "cannot contain ' '"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateWorkspaceName(tt.workspace)
+			if err == nil {
+				t.Fatalf("expected error for workspace name %q", tt.workspace)
+			}
+
+			// Verify it's a CLIError (structured error from PR #340)
+			cliErr, ok := err.(*errors.CLIError)
+			if !ok {
+				t.Fatalf("expected *errors.CLIError, got %T: %v", err, err)
+			}
+
+			if cliErr.Category != errors.CategoryUsage {
+				t.Errorf("expected CategoryUsage, got %v", cliErr.Category)
+			}
+
+			if !strings.Contains(cliErr.Message, tt.wantContains) {
+				t.Errorf("expected message to contain %q, got: %s", tt.wantContains, cliErr.Message)
+			}
+
+			// All invalid workspace name errors should suggest naming conventions
+			if cliErr.Suggestion == "" {
+				t.Error("expected a suggestion for naming conventions")
 			}
 		})
 	}
@@ -2811,6 +3124,163 @@ func TestVersionCommandJSON(t *testing.T) {
 	}
 }
 
+func TestHelpJSON(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Test --json flag at root level
+	err := cli.Execute([]string{"--json"})
+	if err != nil {
+		t.Errorf("Execute(--json) failed: %v", err)
+	}
+
+	// Test --help --json combination
+	err = cli.Execute([]string{"--help", "--json"})
+	if err != nil {
+		t.Errorf("Execute(--help --json) failed: %v", err)
+	}
+
+	// Test subcommand --json
+	err = cli.Execute([]string{"agent", "--json"})
+	if err != nil {
+		t.Errorf("Execute(agent --json) failed: %v", err)
+	}
+}
+
+func TestCommandSchemaConversion(t *testing.T) {
+	cmd := &Command{
+		Name:        "test",
+		Description: "test command",
+		Usage:       "multiclaude test [args]",
+		Subcommands: map[string]*Command{
+			"sub": {
+				Name:        "sub",
+				Description: "subcommand",
+				Usage:       "multiclaude test sub",
+			},
+			"_internal": {
+				Name:        "_internal",
+				Description: "internal command",
+			},
+		},
+	}
+
+	schema := cmd.toSchema()
+
+	if schema.Name != "test" {
+		t.Errorf("expected name 'test', got '%s'", schema.Name)
+	}
+	if schema.Description != "test command" {
+		t.Errorf("expected description 'test command', got '%s'", schema.Description)
+	}
+	if schema.Usage != "multiclaude test [args]" {
+		t.Errorf("expected usage 'multiclaude test [args]', got '%s'", schema.Usage)
+	}
+	if len(schema.Subcommands) != 1 {
+		t.Errorf("expected 1 subcommand (internal should be filtered), got %d", len(schema.Subcommands))
+	}
+	if _, exists := schema.Subcommands["sub"]; !exists {
+		t.Error("expected 'sub' subcommand to exist")
+	}
+	if _, exists := schema.Subcommands["_internal"]; exists {
+		t.Error("internal commands should be filtered from schema")
+	}
+}
+
+// PR #335: Additional JSON output edge cases
+
+func TestCommandSchemaEmptySubcommands(t *testing.T) {
+	cmd := &Command{
+		Name:        "leaf",
+		Description: "leaf command with no subcommands",
+	}
+
+	schema := cmd.toSchema()
+
+	if schema.Name != "leaf" {
+		t.Errorf("expected name 'leaf', got '%s'", schema.Name)
+	}
+	if schema.Subcommands != nil {
+		t.Errorf("expected nil subcommands for leaf command, got %v", schema.Subcommands)
+	}
+}
+
+func TestCommandSchemaNestedSubcommands(t *testing.T) {
+	cmd := &Command{
+		Name:        "root",
+		Description: "root command",
+		Subcommands: map[string]*Command{
+			"level1": {
+				Name:        "level1",
+				Description: "level 1",
+				Subcommands: map[string]*Command{
+					"level2": {
+						Name:        "level2",
+						Description: "level 2",
+						Usage:       "root level1 level2",
+					},
+				},
+			},
+		},
+	}
+
+	schema := cmd.toSchema()
+
+	l1, exists := schema.Subcommands["level1"]
+	if !exists {
+		t.Fatal("expected level1 subcommand")
+	}
+	l2, exists := l1.Subcommands["level2"]
+	if !exists {
+		t.Fatal("expected level2 nested subcommand")
+	}
+	if l2.Usage != "root level1 level2" {
+		t.Errorf("expected nested usage, got: %s", l2.Usage)
+	}
+}
+
+func TestCommandSchemaAllInternalFiltered(t *testing.T) {
+	cmd := &Command{
+		Name:        "test",
+		Description: "test",
+		Subcommands: map[string]*Command{
+			"_a": {Name: "_a", Description: "internal a"},
+			"_b": {Name: "_b", Description: "internal b"},
+		},
+	}
+
+	schema := cmd.toSchema()
+
+	// When all subcommands are internal, map should be empty but not nil
+	if len(schema.Subcommands) != 0 {
+		t.Errorf("expected 0 subcommands (all internal filtered), got %d", len(schema.Subcommands))
+	}
+}
+
+func TestHelpJSONSubcommandOutput(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Test various subcommand --json combinations
+	subcommands := [][]string{
+		{"repo", "--json"},
+		{"worker", "--json"},
+		{"workspace", "--json"},
+		{"daemon", "--json"},
+		{"message", "--json"},
+		{"agent", "--help", "--json"},
+	}
+
+	for _, args := range subcommands {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			err := cli.Execute(args)
+			if err != nil {
+				t.Errorf("Execute(%v) failed: %v", args, err)
+			}
+		})
+	}
+}
+
 func TestShowHelpNoPanic(t *testing.T) {
 	cli, _, cleanup := setupTestEnvironment(t)
 	defer cleanup()
@@ -2822,7 +3292,7 @@ func TestShowHelpNoPanic(t *testing.T) {
 		}
 	}()
 
-	cli.showHelp()
+	cli.showHelp(false)
 }
 
 func TestExecuteEmptyArgs(t *testing.T) {
@@ -3636,4 +4106,378 @@ func TestLoadStateFunction(t *testing.T) {
 			t.Error("loadState() should return non-nil state")
 		}
 	})
+}
+
+// =============================================================================
+// Tests for PR #338: Token-aware status display and help improvements
+// =============================================================================
+
+func TestHibernateCommandIfExists(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repoCmd, ok := cli.rootCmd.Subcommands["repo"]
+	if !ok {
+		t.Fatal("Expected 'repo' command to exist")
+	}
+
+	hibernateCmd, ok := repoCmd.Subcommands["hibernate"]
+	if !ok {
+		t.Skip("hibernate subcommand not yet present")
+	}
+
+	if hibernateCmd.Description == "" {
+		t.Error("hibernate command should have a description")
+	}
+	if hibernateCmd.Usage == "" {
+		t.Error("hibernate command should have usage text")
+	}
+}
+
+func TestHibernateHelpRendering(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repoCmd, ok := cli.rootCmd.Subcommands["repo"]
+	if !ok {
+		t.Fatal("Expected 'repo' command to exist")
+	}
+
+	if _, ok := repoCmd.Subcommands["hibernate"]; !ok {
+		t.Skip("hibernate subcommand not yet present")
+	}
+
+	err := cli.Execute([]string{"repo", "hibernate", "--help"})
+	if err != nil {
+		t.Errorf("repo hibernate --help should not error: %v", err)
+	}
+}
+
+func TestShowCommandHelpBasic(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	cmd := &Command{
+		Name:        "test-help",
+		Description: "Test help rendering",
+		Usage:       "test-help [options]",
+	}
+
+	err := cli.showCommandHelp(cmd, false)
+	if err != nil {
+		t.Errorf("showCommandHelp() returned error: %v", err)
+	}
+}
+
+func TestHandleListReposRichResponseShape(t *testing.T) {
+	_, d, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test-repo",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.GetState().AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+	d.GetState().AddAgent("test-repo", "supervisor", state.Agent{
+		Type:       state.AgentTypeSupervisor,
+		TmuxWindow: "supervisor",
+	})
+	d.GetState().AddAgent("test-repo", "merge-queue", state.Agent{
+		Type:       state.AgentTypeMergeQueue,
+		TmuxWindow: "merge-queue",
+	})
+	d.GetState().AddAgent("test-repo", "happy-fox", state.Agent{
+		Type:       state.AgentTypeWorker,
+		TmuxWindow: "happy-fox",
+		Task:       "implement feature X",
+	})
+	d.GetState().AddAgent("test-repo", "clever-bear", state.Agent{
+		Type:       state.AgentTypeWorker,
+		TmuxWindow: "clever-bear",
+		Task:       "fix bug Y",
+	})
+
+	client := socket.NewClient(d.GetPaths().DaemonSock)
+	resp, err := client.Send(socket.Request{
+		Command: "list_repos",
+		Args:    map[string]interface{}{"rich": true},
+	})
+	if err != nil {
+		t.Fatalf("Failed to send request: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("list_repos failed: %s", resp.Error)
+	}
+
+	repos, ok := resp.Data.([]interface{})
+	if !ok {
+		t.Fatalf("Expected repos array, got %T", resp.Data)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("Expected 1 repo, got %d", len(repos))
+	}
+
+	repoMap, ok := repos[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected repo map, got %T", repos[0])
+	}
+
+	totalAgents, ok := repoMap["total_agents"].(float64)
+	if !ok {
+		t.Fatal("Expected total_agents field")
+	}
+	if int(totalAgents) != 4 {
+		t.Errorf("total_agents = %v, want 4", totalAgents)
+	}
+
+	workerCount, ok := repoMap["worker_count"].(float64)
+	if !ok {
+		t.Fatal("Expected worker_count field")
+	}
+	if int(workerCount) != 2 {
+		t.Errorf("worker_count = %v, want 2", workerCount)
+	}
+}
+
+func TestHandleListReposRichEmptyAgents(t *testing.T) {
+	_, d, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test-repo",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.GetState().AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	client := socket.NewClient(d.GetPaths().DaemonSock)
+	resp, err := client.Send(socket.Request{
+		Command: "list_repos",
+		Args:    map[string]interface{}{"rich": true},
+	})
+	if err != nil {
+		t.Fatalf("Failed to send request: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("list_repos failed: %s", resp.Error)
+	}
+
+	repos, ok := resp.Data.([]interface{})
+	if !ok {
+		t.Fatalf("Expected repos array, got %T", resp.Data)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("Expected 1 repo, got %d", len(repos))
+	}
+
+	repoMap := repos[0].(map[string]interface{})
+	totalAgents := repoMap["total_agents"].(float64)
+	if int(totalAgents) != 0 {
+		t.Errorf("total_agents = %v, want 0", totalAgents)
+	}
+	workerCount := repoMap["worker_count"].(float64)
+	if int(workerCount) != 0 {
+		t.Errorf("worker_count = %v, want 0", workerCount)
+	}
+}
+
+// =============================================================================
+// Tests for PR #339: Context-aware refresh with auto-detection
+// =============================================================================
+
+func TestRefreshContextDetectionFromWorktreePath(t *testing.T) {
+	tests := []struct {
+		name       string
+		cwdSuffix  string
+		wantRepo   string
+		wantAgent  string
+		wantDetect bool
+	}{
+		{
+			name:       "agent worktree path",
+			cwdSuffix:  "my-repo/happy-fox",
+			wantRepo:   "my-repo",
+			wantAgent:  "happy-fox",
+			wantDetect: true,
+		},
+		{
+			name:       "agent worktree with deep subdirectory",
+			cwdSuffix:  "my-repo/happy-fox/src/main",
+			wantRepo:   "my-repo",
+			wantAgent:  "happy-fox",
+			wantDetect: true,
+		},
+		{
+			name:       "repo-only path",
+			cwdSuffix:  "my-repo",
+			wantRepo:   "my-repo",
+			wantAgent:  "",
+			wantDetect: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir, err := os.MkdirTemp("", "refresh-ctx-test-*")
+			if err != nil {
+				t.Fatalf("Failed to create temp dir: %v", err)
+			}
+			defer os.RemoveAll(tmpDir)
+
+			tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+			wtsDir := filepath.Join(tmpDir, "wts")
+
+			testPath := filepath.Join(wtsDir, tt.cwdSuffix)
+			if err := os.MkdirAll(testPath, 0755); err != nil {
+				t.Fatalf("Failed to create test path: %v", err)
+			}
+
+			if !hasPathPrefix(testPath, wtsDir) {
+				t.Fatal("testPath should have wtsDir as prefix")
+			}
+
+			rel, err := filepath.Rel(wtsDir, testPath)
+			if err != nil {
+				t.Fatalf("filepath.Rel failed: %v", err)
+			}
+
+			parts := strings.SplitN(rel, string(filepath.Separator), 2)
+			detected := len(parts) >= 2 && parts[0] != "" && parts[1] != ""
+
+			if detected != tt.wantDetect {
+				t.Errorf("detection = %v, want %v (parts=%v)", detected, tt.wantDetect, parts)
+			}
+
+			if detected {
+				repoName := parts[0]
+				agentName := strings.SplitN(parts[1], string(filepath.Separator), 2)[0]
+				if repoName != tt.wantRepo {
+					t.Errorf("repoName = %q, want %q", repoName, tt.wantRepo)
+				}
+				if agentName != tt.wantAgent {
+					t.Errorf("agentName = %q, want %q", agentName, tt.wantAgent)
+				}
+			}
+		})
+	}
+}
+
+func TestRefreshParseFlagsAllFlag(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantAll bool
+	}{
+		{"no flags", []string{}, false},
+		{"all flag present", []string{"--all"}, true},
+		{"other flags without all", []string{"--repo", "my-repo"}, false},
+		{"all flag with other flags", []string{"--all", "--repo", "my-repo"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags, _ := ParseFlags(tt.args)
+			gotAll := flags["all"] == "true"
+			if gotAll != tt.wantAll {
+				t.Errorf("--all = %v, want %v (flags=%v)", gotAll, tt.wantAll, flags)
+			}
+		})
+	}
+}
+
+func TestRefreshUsageUpdated(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	refreshCmd, ok := cli.rootCmd.Subcommands["refresh"]
+	if !ok {
+		t.Fatal("Expected 'refresh' command to exist")
+	}
+
+	if refreshCmd.Usage == "" {
+		t.Error("refresh command should have a Usage string")
+	}
+	if refreshCmd.Description == "" {
+		t.Error("refresh command should have a description")
+	}
+}
+
+func TestContextDetectionEdgeCases(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		wtsDir    string
+		wantMatch bool
+	}{
+		{"path outside worktrees dir", "/home/user/projects/my-repo", "/home/user/.multiclaude/wts", false},
+		{"path is exactly the wts dir", "/home/user/.multiclaude/wts", "/home/user/.multiclaude/wts", true},
+		{"path with similar prefix", "/home/user/.multiclaude/wts-backup/repo/agent", "/home/user/.multiclaude/wts", false},
+		{"path with trailing separator", "/home/user/.multiclaude/wts/repo/agent", "/home/user/.multiclaude/wts/", true},
+		{"path with dotfiles", "/home/user/.multiclaude/wts/.hidden-repo/agent", "/home/user/.multiclaude/wts", true},
+		{"path with spaces", "/home/user/.multiclaude/wts/my repo/agent", "/home/user/.multiclaude/wts", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasPathPrefix(tt.path, tt.wtsDir)
+			if got != tt.wantMatch {
+				t.Errorf("hasPathPrefix(%q, %q) = %v, want %v", tt.path, tt.wtsDir, got, tt.wantMatch)
+			}
+		})
+	}
+}
+
+func TestRefreshCommandHelp(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	err := cli.Execute([]string{"refresh", "--help"})
+	if err != nil {
+		t.Errorf("refresh --help should not error: %v", err)
+	}
+}
+
+func TestAgentContextPathParsing(t *testing.T) {
+	tests := []struct {
+		name      string
+		rel       string
+		wantRepo  string
+		wantAgent string
+		wantOK    bool
+	}{
+		{"standard two-component", "multiclaude/happy-fox", "multiclaude", "happy-fox", true},
+		{"path with subdir", "multiclaude/happy-fox/internal/cli", "multiclaude", "happy-fox", true},
+		{"single component", "multiclaude", "", "", false},
+		{"empty relative path", ".", "", "", false},
+		{"repo with dots", "my.repo.name/agent-1", "my.repo.name", "agent-1", true},
+		{"repo with hyphens", "my-cool-repo/lively-otter", "my-cool-repo", "lively-otter", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parts := strings.SplitN(tt.rel, string(filepath.Separator), 2)
+			ok := len(parts) >= 2 && parts[0] != "" && parts[1] != ""
+
+			if ok != tt.wantOK {
+				t.Errorf("detection = %v, want %v (parts=%v)", ok, tt.wantOK, parts)
+				return
+			}
+
+			if ok {
+				repoName := parts[0]
+				agentName := strings.SplitN(parts[1], string(filepath.Separator), 2)[0]
+				if repoName != tt.wantRepo {
+					t.Errorf("repo = %q, want %q", repoName, tt.wantRepo)
+				}
+				if agentName != tt.wantAgent {
+					t.Errorf("agent = %q, want %q", agentName, tt.wantAgent)
+				}
+			}
+		})
+	}
 }

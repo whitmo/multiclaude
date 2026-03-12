@@ -156,6 +156,10 @@ type Agent struct {
 }
 
 // Repository represents a tracked repository's state
+// NOTE: This schema is an extension surface. When adding or changing fields,
+// update docs/extending/STATE_FILE_INTEGRATION.md and rerun
+// `go run ./cmd/verify-docs` so downstream readers/LLMs and OpenAPI consumers
+// stay in sync.
 type Repository struct {
 	GithubURL        string             `json:"github_url"`
 	TmuxSession      string             `json:"tmux_session"`
@@ -165,6 +169,64 @@ type Repository struct {
 	PRShepherdConfig PRShepherdConfig   `json:"pr_shepherd_config,omitempty"`
 	ForkConfig       ForkConfig         `json:"fork_config,omitempty"`
 	TargetBranch     string             `json:"target_branch,omitempty"` // Default branch for PRs (usually "main")
+}
+
+// CoreAgentSpec describes a core agent that should exist for a repository.
+type CoreAgentSpec struct {
+	Name string
+	Type AgentType
+}
+
+// MissingCoreAgents returns the list of core agents that should exist for a
+// repository but are currently missing. This centralizes the decision logic
+// for which core agents a repo needs (supervisor always, merge-queue or
+// pr-shepherd depending on fork mode and config).
+func MissingCoreAgents(repo *Repository) []CoreAgentSpec {
+	var missing []CoreAgentSpec
+
+	// Supervisor is always required
+	if _, exists := repo.Agents["supervisor"]; !exists {
+		missing = append(missing, CoreAgentSpec{Name: "supervisor", Type: AgentTypeSupervisor})
+	}
+
+	// Determine fork mode
+	isFork := repo.ForkConfig.IsFork || repo.ForkConfig.ForceForkMode
+
+	if isFork {
+		// Fork mode: pr-shepherd if enabled
+		psConfig := repo.PRShepherdConfig
+		if psConfig.TrackMode == "" {
+			psConfig = DefaultPRShepherdConfig()
+		}
+		if psConfig.Enabled {
+			if _, exists := repo.Agents["pr-shepherd"]; !exists {
+				missing = append(missing, CoreAgentSpec{Name: "pr-shepherd", Type: AgentTypePRShepherd})
+			}
+		}
+	} else {
+		// Non-fork mode: merge-queue if enabled
+		mqConfig := repo.MergeQueueConfig
+		if mqConfig.TrackMode == "" {
+			mqConfig = DefaultMergeQueueConfig()
+		}
+		if mqConfig.Enabled {
+			if _, exists := repo.Agents["merge-queue"]; !exists {
+				missing = append(missing, CoreAgentSpec{Name: "merge-queue", Type: AgentTypeMergeQueue})
+			}
+		}
+	}
+
+	return missing
+}
+
+// HasWorkspace returns true if the repository has at least one workspace agent.
+func (r *Repository) HasWorkspace() bool {
+	for _, agent := range r.Agents {
+		if agent.Type == AgentTypeWorkspace {
+			return true
+		}
+	}
+	return false
 }
 
 // State represents the entire daemon state
